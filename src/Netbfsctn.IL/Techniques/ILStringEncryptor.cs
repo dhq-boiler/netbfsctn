@@ -1,21 +1,22 @@
-using Mono.Cecil;
-using Mono.Cecil.Cil;
+using dnlib.DotNet;
+using dnlib.DotNet.Emit;
 using Netbfsctn.Core.Encryption;
 using Netbfsctn.Core.Pipeline;
 using Netbfsctn.Core.Techniques;
 
 namespace Netbfsctn.IL.Techniques;
 
-public class ILStringEncryptor : IObfuscationTechnique<ModuleDefinition>
+public class ILStringEncryptor : IObfuscationTechnique<ModuleDef>
 {
     public string Name => "文字列暗号化 (IL)";
 
-    public void Apply(ModuleDefinition module, ObfuscationContext context, ObfuscationResult result)
+    public void Apply(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
     {
         var encryptor = new XorStringEncryptor();
+        var importer = new Importer(module);
 
         // 復号ヘルパー型を注入
-        var helperType = InjectDecryptionHelper(module);
+        var helperType = InjectDecryptionHelper(module, importer);
         var decryptMethod = helperType.Methods.First(m => m.Name == "D");
 
         foreach (var type in module.Types)
@@ -27,21 +28,22 @@ public class ILStringEncryptor : IObfuscationTechnique<ModuleDefinition>
             {
                 if (!method.HasBody) continue;
 
-                EncryptStringsInMethod(method, module, decryptMethod, encryptor, context, result);
+                EncryptStringsInMethod(method, module, importer, decryptMethod, encryptor, context, result);
             }
         }
     }
 
     private void EncryptStringsInMethod(
-        MethodDefinition method,
-        ModuleDefinition module,
-        MethodDefinition decryptMethod,
+        MethodDef method,
+        ModuleDef module,
+        Importer importer,
+        MethodDef decryptMethod,
         XorStringEncryptor encryptor,
         ObfuscationContext context,
         ObfuscationResult result)
     {
-        var il = method.Body.GetILProcessor();
-        var instructions = method.Body.Instructions.ToList();
+        var body = method.Body;
+        var instructions = body.Instructions.ToList();
 
         foreach (var instr in instructions)
         {
@@ -55,28 +57,21 @@ public class ILStringEncryptor : IObfuscationTechnique<ModuleDefinition>
             var key = encryptor.GenerateKey();
             var encrypted = encryptor.Encrypt(original, key);
 
-            // ldstr を以下に置換:
-            // 1. 暗号化バイト配列をロード
-            // 2. キーバイト配列をロード
-            // 3. D(byte[], byte[]) を呼び出し
-
             var newInstructions = new List<Instruction>();
 
             // 暗号化データの配列を生成
-            newInstructions.AddRange(CreateByteArrayLoadInstructions(il, encrypted, module));
-            newInstructions.AddRange(CreateByteArrayLoadInstructions(il, key, module));
-            newInstructions.Add(il.Create(OpCodes.Call, module.ImportReference(decryptMethod)));
+            newInstructions.AddRange(CreateByteArrayLoadInstructions(encrypted, module));
+            newInstructions.AddRange(CreateByteArrayLoadInstructions(key, module));
+            newInstructions.Add(new Instruction(OpCodes.Call, decryptMethod));
 
             // 元の ldstr を最初の命令に置き換え
-            var first = newInstructions[0];
-            il.Replace(instr, first);
+            var idx = body.Instructions.IndexOf(instr);
+            body.Instructions[idx] = newInstructions[0];
 
             // 残りの命令を後続に挿入
-            var prev = first;
             for (var i = 1; i < newInstructions.Count; i++)
             {
-                il.InsertAfter(prev, newInstructions[i]);
-                prev = newInstructions[i];
+                body.Instructions.Insert(idx + i, newInstructions[i]);
             }
 
             result.EncryptedStrings++;
@@ -84,111 +79,112 @@ public class ILStringEncryptor : IObfuscationTechnique<ModuleDefinition>
         }
     }
 
-    private static List<Instruction> CreateByteArrayLoadInstructions(
-        ILProcessor il, byte[] data, ModuleDefinition module)
+    private static List<Instruction> CreateByteArrayLoadInstructions(byte[] data, ModuleDef module)
     {
         var instructions = new List<Instruction>();
 
         // 配列サイズ
-        instructions.Add(il.Create(OpCodes.Ldc_I4, data.Length));
-        instructions.Add(il.Create(OpCodes.Newarr, module.ImportReference(typeof(byte))));
+        instructions.Add(Instruction.CreateLdcI4(data.Length));
+        instructions.Add(new Instruction(OpCodes.Newarr, module.CorLibTypes.Byte.TypeDefOrRef));
 
         for (var i = 0; i < data.Length; i++)
         {
-            instructions.Add(il.Create(OpCodes.Dup));
-            instructions.Add(il.Create(OpCodes.Ldc_I4, i));
-            instructions.Add(il.Create(OpCodes.Ldc_I4, (int)data[i]));
-            instructions.Add(il.Create(OpCodes.Stelem_I1));
+            instructions.Add(new Instruction(OpCodes.Dup));
+            instructions.Add(Instruction.CreateLdcI4(i));
+            instructions.Add(Instruction.CreateLdcI4(data[i]));
+            instructions.Add(new Instruction(OpCodes.Stelem_I1));
         }
 
         return instructions;
     }
 
-    private TypeDefinition InjectDecryptionHelper(ModuleDefinition module)
+    private TypeDefUser InjectDecryptionHelper(ModuleDef module, Importer importer)
     {
-        var helperType = new TypeDefinition(
+        var helperType = new TypeDefUser(
             "",
             "\u200B\u200C\u200D",
-            TypeAttributes.NotPublic | TypeAttributes.Sealed | TypeAttributes.Abstract,
-            module.ImportReference(typeof(object)));
+            module.CorLibTypes.Object.TypeDefOrRef);
+        helperType.Attributes = dnlib.DotNet.TypeAttributes.NotPublic | dnlib.DotNet.TypeAttributes.Sealed
+            | dnlib.DotNet.TypeAttributes.Abstract;
 
-        var decryptMethod = new MethodDefinition(
+        var byteArraySig = new SZArraySig(module.CorLibTypes.Byte);
+
+        var decryptMethod = new MethodDefUser(
             "D",
-            MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig,
-            module.ImportReference(typeof(string)));
+            MethodSig.CreateStatic(module.CorLibTypes.String, byteArraySig, byteArraySig),
+            dnlib.DotNet.MethodImplAttributes.IL | dnlib.DotNet.MethodImplAttributes.Managed,
+            dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.Static
+                | dnlib.DotNet.MethodAttributes.HideBySig);
 
-        decryptMethod.Parameters.Add(new ParameterDefinition("d", ParameterAttributes.None,
-            module.ImportReference(typeof(byte[]))));
-        decryptMethod.Parameters.Add(new ParameterDefinition("k", ParameterAttributes.None,
-            module.ImportReference(typeof(byte[]))));
+        decryptMethod.ParamDefs.Add(new ParamDefUser("d", 1));
+        decryptMethod.ParamDefs.Add(new ParamDefUser("k", 2));
 
-        var il = decryptMethod.Body.GetILProcessor();
-        decryptMethod.Body.InitLocals = true;
+        var body = new CilBody();
+        decryptMethod.Body = body;
+        body.InitLocals = true;
 
         // byte[] result = new byte[d.Length];
-        var resultVar = new VariableDefinition(module.ImportReference(typeof(byte[])));
-        var iVar = new VariableDefinition(module.ImportReference(typeof(int)));
-        decryptMethod.Body.Variables.Add(resultVar);
-        decryptMethod.Body.Variables.Add(iVar);
+        var resultVar = new Local(byteArraySig);
+        var iVar = new Local(module.CorLibTypes.Int32);
+        body.Variables.Add(resultVar);
+        body.Variables.Add(iVar);
 
-        il.Append(il.Create(OpCodes.Ldarg_0));
-        il.Append(il.Create(OpCodes.Ldlen));
-        il.Append(il.Create(OpCodes.Conv_I4));
-        il.Append(il.Create(OpCodes.Newarr, module.ImportReference(typeof(byte))));
-        il.Append(il.Create(OpCodes.Stloc_0));
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_0));
+        body.Instructions.Add(new Instruction(OpCodes.Ldlen));
+        body.Instructions.Add(new Instruction(OpCodes.Conv_I4));
+        body.Instructions.Add(new Instruction(OpCodes.Newarr, module.CorLibTypes.Byte.TypeDefOrRef));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc_0));
 
         // i = 0
-        il.Append(il.Create(OpCodes.Ldc_I4_0));
-        il.Append(il.Create(OpCodes.Stloc_1));
+        body.Instructions.Add(new Instruction(OpCodes.Ldc_I4_0));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc_1));
 
         // ループ先頭
-        var loopStart = il.Create(OpCodes.Ldloc_1);
-        var loopBody = il.Create(OpCodes.Ldloc_0);
-        il.Append(il.Create(OpCodes.Br, loopStart));
+        var loopStart = new Instruction(OpCodes.Ldloc_1);
+        var loopBody = new Instruction(OpCodes.Ldloc_0);
+        body.Instructions.Add(new Instruction(OpCodes.Br, loopStart));
 
         // result[i] = (byte)(d[i] ^ k[i % k.Length])
-        il.Append(loopBody);
-        il.Append(il.Create(OpCodes.Ldloc_1));
+        body.Instructions.Add(loopBody);
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_1));
 
-        il.Append(il.Create(OpCodes.Ldarg_0));
-        il.Append(il.Create(OpCodes.Ldloc_1));
-        il.Append(il.Create(OpCodes.Ldelem_U1));
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_0));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_1));
+        body.Instructions.Add(new Instruction(OpCodes.Ldelem_U1));
 
-        il.Append(il.Create(OpCodes.Ldarg_1));
-        il.Append(il.Create(OpCodes.Ldloc_1));
-        il.Append(il.Create(OpCodes.Ldarg_1));
-        il.Append(il.Create(OpCodes.Ldlen));
-        il.Append(il.Create(OpCodes.Conv_I4));
-        il.Append(il.Create(OpCodes.Rem));
-        il.Append(il.Create(OpCodes.Ldelem_U1));
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_1));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_1));
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_1));
+        body.Instructions.Add(new Instruction(OpCodes.Ldlen));
+        body.Instructions.Add(new Instruction(OpCodes.Conv_I4));
+        body.Instructions.Add(new Instruction(OpCodes.Rem));
+        body.Instructions.Add(new Instruction(OpCodes.Ldelem_U1));
 
-        il.Append(il.Create(OpCodes.Xor));
-        il.Append(il.Create(OpCodes.Conv_U1));
-        il.Append(il.Create(OpCodes.Stelem_I1));
+        body.Instructions.Add(new Instruction(OpCodes.Xor));
+        body.Instructions.Add(new Instruction(OpCodes.Conv_U1));
+        body.Instructions.Add(new Instruction(OpCodes.Stelem_I1));
 
         // i++
-        il.Append(il.Create(OpCodes.Ldloc_1));
-        il.Append(il.Create(OpCodes.Ldc_I4_1));
-        il.Append(il.Create(OpCodes.Add));
-        il.Append(il.Create(OpCodes.Stloc_1));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_1));
+        body.Instructions.Add(new Instruction(OpCodes.Ldc_I4_1));
+        body.Instructions.Add(new Instruction(OpCodes.Add));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc_1));
 
         // i < d.Length
-        il.Append(loopStart);
-        il.Append(il.Create(OpCodes.Ldarg_0));
-        il.Append(il.Create(OpCodes.Ldlen));
-        il.Append(il.Create(OpCodes.Conv_I4));
-        il.Append(il.Create(OpCodes.Blt, loopBody));
+        body.Instructions.Add(loopStart);
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_0));
+        body.Instructions.Add(new Instruction(OpCodes.Ldlen));
+        body.Instructions.Add(new Instruction(OpCodes.Conv_I4));
+        body.Instructions.Add(new Instruction(OpCodes.Blt, loopBody));
 
         // return Encoding.UTF8.GetString(result)
-        var getUtf8 = module.ImportReference(
-            typeof(System.Text.Encoding).GetProperty("UTF8")!.GetGetMethod()!);
-        var getString = module.ImportReference(
-            typeof(System.Text.Encoding).GetMethod("GetString", [typeof(byte[])])!);
+        var getUtf8 = importer.Import(typeof(System.Text.Encoding).GetProperty("UTF8")!.GetGetMethod()!);
+        var getString = importer.Import(typeof(System.Text.Encoding).GetMethod("GetString", [typeof(byte[])])!);
 
-        il.Append(il.Create(OpCodes.Call, getUtf8));
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Callvirt, getString));
-        il.Append(il.Create(OpCodes.Ret));
+        body.Instructions.Add(new Instruction(OpCodes.Call, getUtf8));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_0));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, getString));
+        body.Instructions.Add(new Instruction(OpCodes.Ret));
 
         helperType.Methods.Add(decryptMethod);
         module.Types.Add(helperType);

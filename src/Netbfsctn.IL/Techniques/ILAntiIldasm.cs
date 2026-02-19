@@ -1,37 +1,42 @@
-using Mono.Cecil;
+using dnlib.DotNet;
+using dnlib.DotNet.Emit;
 using Netbfsctn.Core.Pipeline;
 using Netbfsctn.Core.Techniques;
 
 namespace Netbfsctn.IL.Techniques;
 
-public class ILAntiIldasm : IObfuscationTechnique<ModuleDefinition>
+public class ILAntiIldasm : IObfuscationTechnique<ModuleDef>
 {
     public string Name => "Anti-ILDASM (IL)";
 
-    public void Apply(ModuleDefinition module, ObfuscationContext context, ObfuscationResult result)
+    public void Apply(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
     {
         // SuppressIldasmAttribute 型をモジュール内に自己定義
-        var attrType = new TypeDefinition(
+        var attrType = new TypeDefUser(
             "System.Runtime.CompilerServices",
             "SuppressIldasmAttribute",
-            TypeAttributes.NotPublic | TypeAttributes.Sealed,
-            module.ImportReference(typeof(Attribute)));
+            module.Import(typeof(Attribute)).ToTypeSig().ToTypeDefOrRef());
+        attrType.Attributes = dnlib.DotNet.TypeAttributes.NotPublic | dnlib.DotNet.TypeAttributes.Sealed;
 
-        var ctor = new MethodDefinition(
+        var ctor = new MethodDefUser(
             ".ctor",
-            MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName
-                | MethodAttributes.RTSpecialName,
-            module.ImportReference(typeof(void)));
+            MethodSig.CreateInstance(module.CorLibTypes.Void),
+            dnlib.DotNet.MethodImplAttributes.IL | dnlib.DotNet.MethodImplAttributes.Managed,
+            dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.HideBySig
+                | dnlib.DotNet.MethodAttributes.SpecialName | dnlib.DotNet.MethodAttributes.RTSpecialName);
 
-        var il = ctor.Body.GetILProcessor();
-        // Attribute の protected コンストラクタを取得
-        var baseCtor = module.ImportReference(
-            typeof(Attribute).GetConstructor(
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
-                null, Type.EmptyTypes, null)!);
-        il.Append(il.Create(Mono.Cecil.Cil.OpCodes.Ldarg_0));
-        il.Append(il.Create(Mono.Cecil.Cil.OpCodes.Call, baseCtor));
-        il.Append(il.Create(Mono.Cecil.Cil.OpCodes.Ret));
+        var body = new CilBody();
+        ctor.Body = body;
+
+        // Attribute の protected コンストラクタを呼び出し
+        var importer = new Importer(module);
+        var baseCtor = importer.Import(typeof(Attribute).GetConstructor(
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+            null, Type.EmptyTypes, null)!);
+
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_0));
+        body.Instructions.Add(new Instruction(OpCodes.Call, baseCtor));
+        body.Instructions.Add(new Instruction(OpCodes.Ret));
 
         attrType.Methods.Add(ctor);
         module.Types.Add(attrType);

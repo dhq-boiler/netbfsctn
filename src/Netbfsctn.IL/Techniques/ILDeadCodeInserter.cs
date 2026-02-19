@@ -1,15 +1,15 @@
-using Mono.Cecil;
-using Mono.Cecil.Cil;
+using dnlib.DotNet;
+using dnlib.DotNet.Emit;
 using Netbfsctn.Core.Pipeline;
 using Netbfsctn.Core.Techniques;
 
 namespace Netbfsctn.IL.Techniques;
 
-public class ILDeadCodeInserter : IObfuscationTechnique<ModuleDefinition>
+public class ILDeadCodeInserter : IObfuscationTechnique<ModuleDef>
 {
     public string Name => "デッドコード挿入 (IL)";
 
-    public void Apply(ModuleDefinition module, ObfuscationContext context, ObfuscationResult result)
+    public void Apply(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
     {
         // ダミーメソッドを追加
         AddDummyMethods(module, context, result);
@@ -24,7 +24,7 @@ public class ILDeadCodeInserter : IObfuscationTechnique<ModuleDefinition>
             {
                 if (!method.HasBody) continue;
                 if (method.Body.Instructions.Count < 2) continue;
-                if (method.Body.HasExceptionHandlers) continue;
+                if (method.Body.ExceptionHandlers.Count > 0) continue;
 
                 InsertDeadCode(method, module, context, result);
             }
@@ -32,42 +32,37 @@ public class ILDeadCodeInserter : IObfuscationTechnique<ModuleDefinition>
     }
 
     private void InsertDeadCode(
-        MethodDefinition method, ModuleDefinition module,
+        MethodDef method, ModuleDef module,
         ObfuscationContext context, ObfuscationResult result)
     {
         var body = method.Body;
-        var il = body.GetILProcessor();
-        var instructions = body.Instructions.ToList();
-
-        // メソッド先頭にデッドコードブロックを挿入
-        // 不透明述語: int.MaxValue * 0 != 0 → 常に false
         var first = body.Instructions[0];
 
-        var afterDeadCode = il.Create(OpCodes.Nop);
+        var afterDeadCode = new Instruction(OpCodes.Nop);
 
         // 条件: ldc.i4 int.MaxValue → ldc.i4.0 → mul → ldc.i4.0 → beq afterDeadCode
-        // つまり (int.MaxValue * 0) == 0 → true → 分岐して dead code をスキップ
-        var deadCodeStart = il.Create(OpCodes.Ldc_I4, int.MaxValue);
+        var deadCodeStart = Instruction.CreateLdcI4(int.MaxValue);
 
-        il.InsertBefore(first, deadCodeStart);
-        il.InsertBefore(first, il.Create(OpCodes.Ldc_I4_0));
-        il.InsertBefore(first, il.Create(OpCodes.Mul));
-        il.InsertBefore(first, il.Create(OpCodes.Ldc_I4_0));
-        il.InsertBefore(first, il.Create(OpCodes.Beq, afterDeadCode));
+        var insertIdx = body.Instructions.IndexOf(first);
+        body.Instructions.Insert(insertIdx, deadCodeStart);
+        body.Instructions.Insert(insertIdx + 1, new Instruction(OpCodes.Ldc_I4_0));
+        body.Instructions.Insert(insertIdx + 2, new Instruction(OpCodes.Mul));
+        body.Instructions.Insert(insertIdx + 3, new Instruction(OpCodes.Ldc_I4_0));
+        body.Instructions.Insert(insertIdx + 4, new Instruction(OpCodes.Beq, afterDeadCode));
 
         // デッドコード: 到達不能な命令群
-        il.InsertBefore(first, il.Create(OpCodes.Ldc_I4, 42));
-        il.InsertBefore(first, il.Create(OpCodes.Pop));
-        il.InsertBefore(first, il.Create(OpCodes.Ldc_I4, 99));
-        il.InsertBefore(first, il.Create(OpCodes.Pop));
+        body.Instructions.Insert(insertIdx + 5, Instruction.CreateLdcI4(42));
+        body.Instructions.Insert(insertIdx + 6, new Instruction(OpCodes.Pop));
+        body.Instructions.Insert(insertIdx + 7, Instruction.CreateLdcI4(99));
+        body.Instructions.Insert(insertIdx + 8, new Instruction(OpCodes.Pop));
 
-        il.InsertBefore(first, afterDeadCode);
+        body.Instructions.Insert(insertIdx + 9, afterDeadCode);
 
         result.InsertedDeadCodeBlocks++;
         context.Logger.Verbose($"デッドコード挿入: {method.Name}");
     }
 
-    private void AddDummyMethods(ModuleDefinition module, ObfuscationContext context, ObfuscationResult result)
+    private void AddDummyMethods(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
     {
         var random = new Random(42);
 
@@ -82,16 +77,19 @@ public class ILDeadCodeInserter : IObfuscationTechnique<ModuleDefinition>
             for (var i = 0; i < dummyCount; i++)
             {
                 var dummyName = context.NameGenerator.Next();
-                var dummyMethod = new MethodDefinition(
+                var dummyMethod = new MethodDefUser(
                     dummyName,
-                    MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.HideBySig,
-                    module.ImportReference(typeof(int)));
+                    MethodSig.CreateStatic(module.CorLibTypes.Int32),
+                    dnlib.DotNet.MethodImplAttributes.IL | dnlib.DotNet.MethodImplAttributes.Managed,
+                    dnlib.DotNet.MethodAttributes.Private | dnlib.DotNet.MethodAttributes.Static
+                        | dnlib.DotNet.MethodAttributes.HideBySig);
 
-                var il = dummyMethod.Body.GetILProcessor();
-                il.Append(il.Create(OpCodes.Ldc_I4, random.Next(1000)));
-                il.Append(il.Create(OpCodes.Ldc_I4, random.Next(1000)));
-                il.Append(il.Create(OpCodes.Add));
-                il.Append(il.Create(OpCodes.Ret));
+                var body = new CilBody();
+                dummyMethod.Body = body;
+                body.Instructions.Add(Instruction.CreateLdcI4(random.Next(1000)));
+                body.Instructions.Add(Instruction.CreateLdcI4(random.Next(1000)));
+                body.Instructions.Add(new Instruction(OpCodes.Add));
+                body.Instructions.Add(new Instruction(OpCodes.Ret));
 
                 type.Methods.Add(dummyMethod);
                 result.InsertedDeadCodeBlocks++;

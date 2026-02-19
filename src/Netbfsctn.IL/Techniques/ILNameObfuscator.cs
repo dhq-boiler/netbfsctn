@@ -1,14 +1,14 @@
-using Mono.Cecil;
+using dnlib.DotNet;
 using Netbfsctn.Core.Pipeline;
 using Netbfsctn.Core.Techniques;
 
 namespace Netbfsctn.IL.Techniques;
 
-public class ILNameObfuscator : IObfuscationTechnique<ModuleDefinition>
+public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
 {
     public string Name => "名前難読化 (IL)";
 
-    public void Apply(ModuleDefinition module, ObfuscationContext context, ObfuscationResult result)
+    public void Apply(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
     {
         foreach (var type in module.Types)
         {
@@ -19,7 +19,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDefinition>
         }
     }
 
-    private void ProcessType(TypeDefinition type, ObfuscationContext context, ObfuscationResult result)
+    private void ProcessType(TypeDef type, ObfuscationContext context, ObfuscationResult result)
     {
         // ネストされた型を先に処理
         foreach (var nested in type.NestedTypes)
@@ -77,14 +77,14 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDefinition>
         result.RenamedSymbols++;
     }
 
-    private static bool ShouldSkipMethod(MethodDefinition method)
+    private static bool ShouldSkipMethod(MethodDef method)
     {
         if (method.IsPublic) return true;
         if (method.IsConstructor) return true;
         if (method.Name == "Main") return true;
         if (method.IsVirtual) return true;
         if (method.HasOverrides) return true;
-        if (method.IsGetter || method.IsSetter) return true;
+        if (method.IsSpecialName) return true;
         return false;
     }
 }

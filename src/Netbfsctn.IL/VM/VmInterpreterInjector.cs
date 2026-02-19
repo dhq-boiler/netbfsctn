@@ -1,32 +1,31 @@
-using Mono.Cecil;
-using Mono.Cecil.Cil;
+using dnlib.DotNet;
+using dnlib.DotNet.Emit;
 
 namespace Netbfsctn.IL.VM;
 
 public class VmInterpreterInjector
 {
-    public TypeDefinition InjectInterpreter(ModuleDefinition module)
+    public TypeDefUser InjectInterpreter(ModuleDef module)
     {
-        var interpreterType = new TypeDefinition(
-            "",
-            "\u200B\u200D\u200C\u200D",
-            TypeAttributes.NotPublic | TypeAttributes.Sealed | TypeAttributes.Abstract,
-            module.ImportReference(typeof(object)));
+        var importer = new Importer(module);
 
-        // static object Execute(byte[] bytecode, object[] args, string[] tokenTable)
-        var executeMethod = new MethodDefinition(
+        var interpreterType = new TypeDefUser("", "\u200B\u200D\u200C\u200D", module.CorLibTypes.Object.TypeDefOrRef);
+        interpreterType.Attributes = dnlib.DotNet.TypeAttributes.NotPublic | dnlib.DotNet.TypeAttributes.Sealed
+            | dnlib.DotNet.TypeAttributes.Abstract;
+
+        var byteArraySig = new SZArraySig(module.CorLibTypes.Byte);
+        var objectArraySig = new SZArraySig(module.CorLibTypes.Object);
+        var stringArraySig = new SZArraySig(module.CorLibTypes.String);
+
+        var executeMethod = new MethodDefUser(
             "E",
-            MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig,
-            module.ImportReference(typeof(object)));
+            MethodSig.CreateStatic(module.CorLibTypes.Object, byteArraySig, objectArraySig, stringArraySig),
+            dnlib.DotNet.MethodImplAttributes.IL | dnlib.DotNet.MethodImplAttributes.Managed,
+            dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.Static
+                | dnlib.DotNet.MethodAttributes.HideBySig);
 
-        executeMethod.Parameters.Add(new ParameterDefinition("bc", ParameterAttributes.None,
-            module.ImportReference(typeof(byte[]))));
-        executeMethod.Parameters.Add(new ParameterDefinition("args", ParameterAttributes.None,
-            module.ImportReference(typeof(object[]))));
-        executeMethod.Parameters.Add(new ParameterDefinition("tokens", ParameterAttributes.None,
-            module.ImportReference(typeof(string[]))));
-
-        BuildExecuteBody(executeMethod, module);
+        BuildExecuteBody(executeMethod, module, importer);
+        executeMethod.Body.KeepOldMaxStack = true;
 
         interpreterType.Methods.Add(executeMethod);
         module.Types.Add(interpreterType);
@@ -34,267 +33,220 @@ public class VmInterpreterInjector
         return interpreterType;
     }
 
-    private static void BuildExecuteBody(MethodDefinition method, ModuleDefinition module)
+    private static void BuildExecuteBody(MethodDefUser method, ModuleDef module, Importer importer)
     {
-        var il = method.Body.GetILProcessor();
-        method.Body.InitLocals = true;
+        var body = new CilBody();
+        method.Body = body;
+        body.InitLocals = true;
 
-        // ローカル変数:
-        // 0: Stack<object> stack
-        // 1: object[] locals (64 slots)
-        // 2: int pc
-        // 3: BinaryReader reader
-        // 4: byte opcode
-        // 5: object a, 6: object b, 7: object result
-
-        var stackType = module.ImportReference(typeof(Stack<object>));
         var stackTypeDef = typeof(Stack<object>);
-        method.Body.Variables.Add(new VariableDefinition(stackType)); // 0
-        method.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(object[])))); // 1
-        method.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(int)))); // 2: pc
-        method.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(MemoryStream)))); // 3: ms
-        method.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(BinaryReader)))); // 4: reader
-        method.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(byte)))); // 5: opcode
-        method.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(object)))); // 6: temp a
-        method.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(object)))); // 7: temp b
 
-        // stack = new Stack<object>();
-        var stackCtor = module.ImportReference(stackTypeDef.GetConstructor(Type.EmptyTypes)!);
-        il.Append(il.Create(OpCodes.Newobj, stackCtor));
-        il.Append(il.Create(OpCodes.Stloc_0));
+        body.Variables.Add(new Local(importer.ImportAsTypeSig(stackTypeDef))); // 0: stack
+        body.Variables.Add(new Local(new SZArraySig(module.CorLibTypes.Object))); // 1: locals
+        body.Variables.Add(new Local(module.CorLibTypes.Int32)); // 2: pc (unused)
+        body.Variables.Add(new Local(importer.ImportAsTypeSig(typeof(MemoryStream)))); // 3: ms
+        body.Variables.Add(new Local(importer.ImportAsTypeSig(typeof(BinaryReader)))); // 4: reader
+        body.Variables.Add(new Local(module.CorLibTypes.Byte)); // 5: opcode
+        body.Variables.Add(new Local(module.CorLibTypes.Object)); // 6: temp a
+        body.Variables.Add(new Local(module.CorLibTypes.Object)); // 7: temp b
 
-        // locals = new object[64];
-        il.Append(il.Create(OpCodes.Ldc_I4, 64));
-        il.Append(il.Create(OpCodes.Newarr, module.ImportReference(typeof(object))));
-        il.Append(il.Create(OpCodes.Stloc_1));
+        var stackCtor = importer.Import(stackTypeDef.GetConstructor(Type.EmptyTypes)!);
+        var stackPop = importer.Import(stackTypeDef.GetMethod("Pop")!);
+        var stackCount = importer.Import(stackTypeDef.GetProperty("Count")!.GetGetMethod()!);
+        var stackPush = importer.Import(stackTypeDef.GetMethod("Push")!);
 
-        // ms = new MemoryStream(bc);
-        var msCtor = module.ImportReference(typeof(MemoryStream).GetConstructor([typeof(byte[])])!);
-        il.Append(il.Create(OpCodes.Ldarg_0));
-        il.Append(il.Create(OpCodes.Newobj, msCtor));
-        il.Append(il.Create(OpCodes.Stloc_3));
+        var msCtor = importer.Import(typeof(MemoryStream).GetConstructor([typeof(byte[])])!);
+        var brCtor = importer.Import(typeof(BinaryReader).GetConstructor([typeof(Stream)])!);
+        var getPosition = importer.Import(typeof(Stream).GetProperty("Position")!.GetGetMethod()!);
+        var getLength = importer.Import(typeof(Stream).GetProperty("Length")!.GetGetMethod()!);
+        var setPosition = importer.Import(typeof(Stream).GetProperty("Position")!.GetSetMethod()!);
+        var readByte = importer.Import(typeof(BinaryReader).GetMethod("ReadByte")!);
+        var readInt32 = importer.Import(typeof(BinaryReader).GetMethod("ReadInt32")!);
+        var readString = importer.Import(typeof(BinaryReader).GetMethod("ReadString")!);
 
-        // reader = new BinaryReader(ms);
-        var brCtor = module.ImportReference(typeof(BinaryReader).GetConstructor([typeof(Stream)])!);
-        il.Append(il.Create(OpCodes.Ldloc_3));
-        il.Append(il.Create(OpCodes.Newobj, brCtor));
-        il.Append(il.Create(OpCodes.Stloc, 4));
+        // stack = new Stack<object>()
+        body.Instructions.Add(new Instruction(OpCodes.Newobj, stackCtor));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc_0));
 
-        // メインループ: while (ms.Position < ms.Length)
-        var loopStart = il.Create(OpCodes.Ldloc_3);
-        var retNull = il.Create(OpCodes.Ldnull);
+        // locals = new object[64]
+        body.Instructions.Add(Instruction.CreateLdcI4(64));
+        body.Instructions.Add(new Instruction(OpCodes.Newarr, module.CorLibTypes.Object.TypeDefOrRef));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc_1));
 
-        il.Append(loopStart);
-        var getPosition = module.ImportReference(typeof(Stream).GetProperty("Position")!.GetGetMethod()!);
-        var getLength = module.ImportReference(typeof(Stream).GetProperty("Length")!.GetGetMethod()!);
-        il.Append(il.Create(OpCodes.Callvirt, getPosition));
-        il.Append(il.Create(OpCodes.Ldloc_3));
-        il.Append(il.Create(OpCodes.Callvirt, getLength));
-        il.Append(il.Create(OpCodes.Bge, retNull));
+        // ms = new MemoryStream(bc)
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_0));
+        body.Instructions.Add(new Instruction(OpCodes.Newobj, msCtor));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc_3));
 
-        // opcode = reader.ReadByte();
-        var readByte = module.ImportReference(typeof(BinaryReader).GetMethod("ReadByte")!);
-        var readInt32 = module.ImportReference(typeof(BinaryReader).GetMethod("ReadInt32")!);
-        var readInt64 = module.ImportReference(typeof(BinaryReader).GetMethod("ReadInt64")!);
-        var readDouble = module.ImportReference(typeof(BinaryReader).GetMethod("ReadDouble")!);
-        var readString = module.ImportReference(typeof(BinaryReader).GetMethod("ReadString")!);
+        // reader = new BinaryReader(ms)
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_3));
+        body.Instructions.Add(new Instruction(OpCodes.Newobj, brCtor));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc, body.Variables[4]));
 
-        il.Append(il.Create(OpCodes.Ldloc, 4));
-        il.Append(il.Create(OpCodes.Callvirt, readByte));
-        il.Append(il.Create(OpCodes.Stloc, 5));
+        // main loop
+        var loopStart = new Instruction(OpCodes.Ldloc_3);
+        var retNull = new Instruction(OpCodes.Ldnull);
 
-        // switch(opcode) - 簡略化: 主要な命令のみ処理
-        // RET (0xF0) チェック
-        var notRet = il.Create(OpCodes.Ldloc, 5);
-        il.Append(il.Create(OpCodes.Ldloc, 5));
-        il.Append(il.Create(OpCodes.Ldc_I4, (int)VmOpCode.RET));
-        il.Append(il.Create(OpCodes.Bne_Un, notRet));
+        body.Instructions.Add(loopStart);
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, getPosition));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_3));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, getLength));
+        body.Instructions.Add(new Instruction(OpCodes.Bge, retNull));
 
-        // RET: return stack.Count > 0 ? stack.Pop() : null
-        var stackPop = module.ImportReference(stackTypeDef.GetMethod("Pop")!);
-        var stackCount = module.ImportReference(stackTypeDef.GetProperty("Count")!.GetGetMethod()!);
-        var stackPush = module.ImportReference(stackTypeDef.GetMethod("Push")!);
+        // opcode = reader.ReadByte()
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc, body.Variables[4]));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, readByte));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc, body.Variables[5]));
 
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Callvirt, stackCount));
+        // RET check
+        var notRet = new Instruction(OpCodes.Ldloc, body.Variables[5]);
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc, body.Variables[5]));
+        body.Instructions.Add(Instruction.CreateLdcI4((int)VmOpCode.RET));
+        body.Instructions.Add(new Instruction(OpCodes.Bne_Un, notRet));
 
-        var retWithPop = il.Create(OpCodes.Ldloc_0);
-        il.Append(il.Create(OpCodes.Brtrue, retWithPop));
-        il.Append(il.Create(OpCodes.Ldnull));
-        il.Append(il.Create(OpCodes.Ret));
+        var retWithPop = new Instruction(OpCodes.Ldloc_0);
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_0));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, stackCount));
+        body.Instructions.Add(new Instruction(OpCodes.Brtrue, retWithPop));
+        body.Instructions.Add(new Instruction(OpCodes.Ldnull));
+        body.Instructions.Add(new Instruction(OpCodes.Ret));
+        body.Instructions.Add(retWithPop);
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, stackPop));
+        body.Instructions.Add(new Instruction(OpCodes.Ret));
 
-        il.Append(retWithPop);
-        il.Append(il.Create(OpCodes.Callvirt, stackPop));
-        il.Append(il.Create(OpCodes.Ret));
+        // LDC_I4 check
+        var notLdcI4 = new Instruction(OpCodes.Ldloc, body.Variables[5]);
+        body.Instructions.Add(notRet);
+        body.Instructions.Add(Instruction.CreateLdcI4((int)VmOpCode.LDC_I4));
+        body.Instructions.Add(new Instruction(OpCodes.Bne_Un, notLdcI4));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_0));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc, body.Variables[4]));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, readInt32));
+        body.Instructions.Add(new Instruction(OpCodes.Box, module.CorLibTypes.Int32.TypeDefOrRef));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, stackPush));
+        body.Instructions.Add(new Instruction(OpCodes.Br, loopStart));
 
-        // LDC_I4 (0x20) チェック
-        var notLdcI4 = il.Create(OpCodes.Ldloc, 5);
-        il.Append(notRet);
-        il.Append(il.Create(OpCodes.Ldc_I4, (int)VmOpCode.LDC_I4));
-        il.Append(il.Create(OpCodes.Bne_Un, notLdcI4));
+        // LDSTR check
+        var notLdstr = new Instruction(OpCodes.Ldloc, body.Variables[5]);
+        body.Instructions.Add(notLdcI4);
+        body.Instructions.Add(Instruction.CreateLdcI4((int)VmOpCode.LDSTR));
+        body.Instructions.Add(new Instruction(OpCodes.Bne_Un, notLdstr));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_0));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc, body.Variables[4]));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, readString));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, stackPush));
+        body.Instructions.Add(new Instruction(OpCodes.Br, loopStart));
 
-        // stack.Push(reader.ReadInt32())
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Ldloc, 4));
-        il.Append(il.Create(OpCodes.Callvirt, readInt32));
-        il.Append(il.Create(OpCodes.Box, module.ImportReference(typeof(int))));
-        il.Append(il.Create(OpCodes.Callvirt, stackPush));
-        il.Append(il.Create(OpCodes.Br, loopStart));
+        // ADD check
+        var notAdd = new Instruction(OpCodes.Ldloc, body.Variables[5]);
+        body.Instructions.Add(notLdstr);
+        body.Instructions.Add(Instruction.CreateLdcI4((int)VmOpCode.ADD));
+        body.Instructions.Add(new Instruction(OpCodes.Bne_Un, notAdd));
+        EmitBinaryOp(body, stackPop, stackPush, module, OpCodes.Add);
+        body.Instructions.Add(new Instruction(OpCodes.Br, loopStart));
 
-        // LDSTR (0x23) チェック
-        var notLdstr = il.Create(OpCodes.Ldloc, 5);
-        il.Append(notLdcI4);
-        il.Append(il.Create(OpCodes.Ldc_I4, (int)VmOpCode.LDSTR));
-        il.Append(il.Create(OpCodes.Bne_Un, notLdstr));
+        // SUB check
+        var notSub = new Instruction(OpCodes.Ldloc, body.Variables[5]);
+        body.Instructions.Add(notAdd);
+        body.Instructions.Add(Instruction.CreateLdcI4((int)VmOpCode.SUB));
+        body.Instructions.Add(new Instruction(OpCodes.Bne_Un, notSub));
+        EmitBinaryOp(body, stackPop, stackPush, module, OpCodes.Sub);
+        body.Instructions.Add(new Instruction(OpCodes.Br, loopStart));
 
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Ldloc, 4));
-        il.Append(il.Create(OpCodes.Callvirt, readString));
-        il.Append(il.Create(OpCodes.Callvirt, stackPush));
-        il.Append(il.Create(OpCodes.Br, loopStart));
+        // MUL check
+        var notMul = new Instruction(OpCodes.Ldloc, body.Variables[5]);
+        body.Instructions.Add(notSub);
+        body.Instructions.Add(Instruction.CreateLdcI4((int)VmOpCode.MUL));
+        body.Instructions.Add(new Instruction(OpCodes.Bne_Un, notMul));
+        EmitBinaryOp(body, stackPop, stackPush, module, OpCodes.Mul);
+        body.Instructions.Add(new Instruction(OpCodes.Br, loopStart));
 
-        // ADD (0x01) チェック
-        var notAdd = il.Create(OpCodes.Ldloc, 5);
-        il.Append(notLdstr);
-        il.Append(il.Create(OpCodes.Ldc_I4, (int)VmOpCode.ADD));
-        il.Append(il.Create(OpCodes.Bne_Un, notAdd));
+        // LDLOC check
+        var notLdloc = new Instruction(OpCodes.Ldloc, body.Variables[5]);
+        body.Instructions.Add(notMul);
+        body.Instructions.Add(Instruction.CreateLdcI4((int)VmOpCode.LDLOC));
+        body.Instructions.Add(new Instruction(OpCodes.Bne_Un, notLdloc));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_0));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_1));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc, body.Variables[4]));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, readInt32));
+        body.Instructions.Add(new Instruction(OpCodes.Ldelem_Ref));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, stackPush));
+        body.Instructions.Add(new Instruction(OpCodes.Br, loopStart));
 
-        // b = stack.Pop(); a = stack.Pop(); stack.Push((int)a + (int)b);
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Callvirt, stackPop));
-        il.Append(il.Create(OpCodes.Stloc, 7)); // b
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Callvirt, stackPop));
-        il.Append(il.Create(OpCodes.Stloc, 6)); // a
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Ldloc, 6));
-        il.Append(il.Create(OpCodes.Unbox_Any, module.ImportReference(typeof(int))));
-        il.Append(il.Create(OpCodes.Ldloc, 7));
-        il.Append(il.Create(OpCodes.Unbox_Any, module.ImportReference(typeof(int))));
-        il.Append(il.Create(OpCodes.Add));
-        il.Append(il.Create(OpCodes.Box, module.ImportReference(typeof(int))));
-        il.Append(il.Create(OpCodes.Callvirt, stackPush));
-        il.Append(il.Create(OpCodes.Br, loopStart));
+        // STLOC check
+        var notStloc = new Instruction(OpCodes.Ldloc, body.Variables[5]);
+        body.Instructions.Add(notLdloc);
+        body.Instructions.Add(Instruction.CreateLdcI4((int)VmOpCode.STLOC));
+        body.Instructions.Add(new Instruction(OpCodes.Bne_Un, notStloc));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_1));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc, body.Variables[4]));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, readInt32));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_0));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, stackPop));
+        body.Instructions.Add(new Instruction(OpCodes.Stelem_Ref));
+        body.Instructions.Add(new Instruction(OpCodes.Br, loopStart));
 
-        // SUB (0x02) チェック
-        var notSub = il.Create(OpCodes.Ldloc, 5);
-        il.Append(notAdd);
-        il.Append(il.Create(OpCodes.Ldc_I4, (int)VmOpCode.SUB));
-        il.Append(il.Create(OpCodes.Bne_Un, notSub));
+        // LDARG check
+        var notLdarg = new Instruction(OpCodes.Ldloc, body.Variables[5]);
+        body.Instructions.Add(notStloc);
+        body.Instructions.Add(Instruction.CreateLdcI4((int)VmOpCode.LDARG));
+        body.Instructions.Add(new Instruction(OpCodes.Bne_Un, notLdarg));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_0));
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_1));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc, body.Variables[4]));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, readInt32));
+        body.Instructions.Add(new Instruction(OpCodes.Ldelem_Ref));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, stackPush));
+        body.Instructions.Add(new Instruction(OpCodes.Br, loopStart));
 
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Callvirt, stackPop));
-        il.Append(il.Create(OpCodes.Stloc, 7));
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Callvirt, stackPop));
-        il.Append(il.Create(OpCodes.Stloc, 6));
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Ldloc, 6));
-        il.Append(il.Create(OpCodes.Unbox_Any, module.ImportReference(typeof(int))));
-        il.Append(il.Create(OpCodes.Ldloc, 7));
-        il.Append(il.Create(OpCodes.Unbox_Any, module.ImportReference(typeof(int))));
-        il.Append(il.Create(OpCodes.Sub));
-        il.Append(il.Create(OpCodes.Box, module.ImportReference(typeof(int))));
-        il.Append(il.Create(OpCodes.Callvirt, stackPush));
-        il.Append(il.Create(OpCodes.Br, loopStart));
+        // BR check
+        var notBr = new Instruction(OpCodes.Ldloc, body.Variables[5]);
+        body.Instructions.Add(notLdarg);
+        body.Instructions.Add(Instruction.CreateLdcI4((int)VmOpCode.BR));
+        body.Instructions.Add(new Instruction(OpCodes.Bne_Un, notBr));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_3));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc, body.Variables[4]));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, readInt32));
+        body.Instructions.Add(new Instruction(OpCodes.Conv_I8));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, setPosition));
+        body.Instructions.Add(new Instruction(OpCodes.Br, loopStart));
 
-        // MUL (0x03) チェック
-        var notMul = il.Create(OpCodes.Ldloc, 5);
-        il.Append(notSub);
-        il.Append(il.Create(OpCodes.Ldc_I4, (int)VmOpCode.MUL));
-        il.Append(il.Create(OpCodes.Bne_Un, notMul));
+        // POP check
+        var notPop = new Instruction(OpCodes.Ldloc, body.Variables[5]);
+        body.Instructions.Add(notBr);
+        body.Instructions.Add(Instruction.CreateLdcI4((int)VmOpCode.POP));
+        body.Instructions.Add(new Instruction(OpCodes.Bne_Un, notPop));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_0));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, stackPop));
+        body.Instructions.Add(new Instruction(OpCodes.Pop));
+        body.Instructions.Add(new Instruction(OpCodes.Br, loopStart));
 
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Callvirt, stackPop));
-        il.Append(il.Create(OpCodes.Stloc, 7));
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Callvirt, stackPop));
-        il.Append(il.Create(OpCodes.Stloc, 6));
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Ldloc, 6));
-        il.Append(il.Create(OpCodes.Unbox_Any, module.ImportReference(typeof(int))));
-        il.Append(il.Create(OpCodes.Ldloc, 7));
-        il.Append(il.Create(OpCodes.Unbox_Any, module.ImportReference(typeof(int))));
-        il.Append(il.Create(OpCodes.Mul));
-        il.Append(il.Create(OpCodes.Box, module.ImportReference(typeof(int))));
-        il.Append(il.Create(OpCodes.Callvirt, stackPush));
-        il.Append(il.Create(OpCodes.Br, loopStart));
+        // default: continue loop
+        body.Instructions.Add(notPop);
+        body.Instructions.Add(new Instruction(OpCodes.Br, loopStart));
 
-        // LDLOC (0x30) チェック
-        var notLdloc = il.Create(OpCodes.Ldloc, 5);
-        il.Append(notMul);
-        il.Append(il.Create(OpCodes.Ldc_I4, (int)VmOpCode.LDLOC));
-        il.Append(il.Create(OpCodes.Bne_Un, notLdloc));
+        // return null
+        body.Instructions.Add(retNull);
+        body.Instructions.Add(new Instruction(OpCodes.Ret));
+    }
 
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Ldloc_1)); // locals array
-        il.Append(il.Create(OpCodes.Ldloc, 4));
-        il.Append(il.Create(OpCodes.Callvirt, readInt32));
-        il.Append(il.Create(OpCodes.Ldelem_Ref));
-        il.Append(il.Create(OpCodes.Callvirt, stackPush));
-        il.Append(il.Create(OpCodes.Br, loopStart));
-
-        // STLOC (0x31) チェック
-        var notStloc = il.Create(OpCodes.Ldloc, 5);
-        il.Append(notLdloc);
-        il.Append(il.Create(OpCodes.Ldc_I4, (int)VmOpCode.STLOC));
-        il.Append(il.Create(OpCodes.Bne_Un, notStloc));
-
-        il.Append(il.Create(OpCodes.Ldloc_1)); // locals array
-        il.Append(il.Create(OpCodes.Ldloc, 4));
-        il.Append(il.Create(OpCodes.Callvirt, readInt32));
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Callvirt, stackPop));
-        il.Append(il.Create(OpCodes.Stelem_Ref));
-        il.Append(il.Create(OpCodes.Br, loopStart));
-
-        // LDARG (0x32) チェック
-        var notLdarg = il.Create(OpCodes.Ldloc, 5);
-        il.Append(notStloc);
-        il.Append(il.Create(OpCodes.Ldc_I4, (int)VmOpCode.LDARG));
-        il.Append(il.Create(OpCodes.Bne_Un, notLdarg));
-
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Ldarg_1)); // args array
-        il.Append(il.Create(OpCodes.Ldloc, 4));
-        il.Append(il.Create(OpCodes.Callvirt, readInt32));
-        il.Append(il.Create(OpCodes.Ldelem_Ref));
-        il.Append(il.Create(OpCodes.Callvirt, stackPush));
-        il.Append(il.Create(OpCodes.Br, loopStart));
-
-        // BR (0x40) チェック - 無条件分岐
-        var notBr = il.Create(OpCodes.Ldloc, 5);
-        il.Append(notLdarg);
-        il.Append(il.Create(OpCodes.Ldc_I4, (int)VmOpCode.BR));
-        il.Append(il.Create(OpCodes.Bne_Un, notBr));
-
-        var setPosition = module.ImportReference(typeof(Stream).GetProperty("Position")!.GetSetMethod()!);
-        il.Append(il.Create(OpCodes.Ldloc_3)); // ms
-        il.Append(il.Create(OpCodes.Ldloc, 4));
-        il.Append(il.Create(OpCodes.Callvirt, readInt32));
-        il.Append(il.Create(OpCodes.Conv_I8));
-        il.Append(il.Create(OpCodes.Callvirt, setPosition));
-        il.Append(il.Create(OpCodes.Br, loopStart));
-
-        // POP (0x26) チェック
-        var notPop = il.Create(OpCodes.Ldloc, 5);
-        il.Append(notBr);
-        il.Append(il.Create(OpCodes.Ldc_I4, (int)VmOpCode.POP));
-        il.Append(il.Create(OpCodes.Bne_Un, notPop));
-
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Callvirt, stackPop));
-        il.Append(il.Create(OpCodes.Pop));
-        il.Append(il.Create(OpCodes.Br, loopStart));
-
-        // NOP (0xFF) チェック and default - just continue loop
-        il.Append(notPop);
-        // 未知の命令はスキップ (reader.ReadInt32 でオペランドを消費)
-        // ただし一部命令はオペランドなしなのでそのまま進む
-        il.Append(il.Create(OpCodes.Br, loopStart));
-
-        // return null (ループ終了)
-        il.Append(retNull);
-        il.Append(il.Create(OpCodes.Ret));
+    private static void EmitBinaryOp(CilBody body, IMethod stackPop, IMethod stackPush,
+        ModuleDef module, OpCode arithOp)
+    {
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_0));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, stackPop));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc, body.Variables[7]));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_0));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, stackPop));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc, body.Variables[6]));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_0));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc, body.Variables[6]));
+        body.Instructions.Add(new Instruction(OpCodes.Unbox_Any, module.CorLibTypes.Int32.TypeDefOrRef));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc, body.Variables[7]));
+        body.Instructions.Add(new Instruction(OpCodes.Unbox_Any, module.CorLibTypes.Int32.TypeDefOrRef));
+        body.Instructions.Add(new Instruction(arithOp));
+        body.Instructions.Add(new Instruction(OpCodes.Box, module.CorLibTypes.Int32.TypeDefOrRef));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, stackPush));
     }
 }

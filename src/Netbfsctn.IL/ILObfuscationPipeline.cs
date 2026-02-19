@@ -1,5 +1,6 @@
 using System.Text.Json;
-using Mono.Cecil;
+using dnlib.DotNet;
+using dnlib.DotNet.Writer;
 using Netbfsctn.Core.Pipeline;
 using Netbfsctn.Core.Techniques;
 using Netbfsctn.IL.Techniques;
@@ -19,13 +20,15 @@ public class ILObfuscationPipeline : IObfuscationPipeline
                 ?? BuildDefaultOutputPath(options.InputPath);
 
             logger.Info($"アセンブリを読み込み中: {options.InputPath}");
-            var readerParams = new ReaderParameters { ReadWrite = false };
-            using var assembly = AssemblyDefinition.ReadAssembly(options.InputPath, readerParams);
-            var module = assembly.MainModule;
+            using var module = ModuleDefMD.Load(options.InputPath);
+
+            var isMixedMode = !module.IsILOnly;
+            if (isMixedMode)
+                logger.Info("混合モード (C++/CLI) アセンブリを検出しました。NativeModuleWriter を使用します。");
 
             var result = new ObfuscationResult { Success = true, OutputPath = outputPath };
 
-            var techniques = new List<IObfuscationTechnique<ModuleDefinition>>();
+            var techniques = new List<IObfuscationTechnique<ModuleDef>>();
 
             // 既存テクニック
             if (options.EnableRename)
@@ -64,7 +67,15 @@ public class ILObfuscationPipeline : IObfuscationPipeline
                 Directory.CreateDirectory(dir);
 
             logger.Info($"保存中: {outputPath}");
-            assembly.Write(outputPath);
+            if (isMixedMode)
+            {
+                var nativeOptions = new NativeModuleWriterOptions(module, optimizeImageSize: false);
+                module.NativeWrite(outputPath, nativeOptions);
+            }
+            else
+            {
+                module.Write(outputPath);
+            }
 
             // マッピングファイルのポスト処理
             if (options.EnableMappingFile || options.EnableRename)

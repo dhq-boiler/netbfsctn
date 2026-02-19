@@ -1,21 +1,23 @@
-using Mono.Cecil;
-using Mono.Cecil.Cil;
+using dnlib.DotNet;
+using dnlib.DotNet.Emit;
 using Netbfsctn.Core.Pipeline;
 using Netbfsctn.Core.Techniques;
 
 namespace Netbfsctn.IL.Techniques;
 
-public class ILNecroBit : IObfuscationTechnique<ModuleDefinition>
+public class ILNecroBit : IObfuscationTechnique<ModuleDef>
 {
     public string Name => "NecroBit (IL)";
 
     private const string ResourceName = "__nb_data__";
     private const byte XorKey = 0xC7;
 
-    public void Apply(ModuleDefinition module, ObfuscationContext context, ObfuscationResult result)
+    public void Apply(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
     {
+        var importer = new Importer(module);
+
         // ヘルパー型を注入
-        var helperType = InjectNecroBitHelper(module);
+        var helperType = InjectNecroBitHelper(module, importer);
         var restoreMethod = helperType.Methods.First(m => m.Name == "R");
 
         var methodDataMap = new Dictionary<int, byte[]>();
@@ -35,8 +37,7 @@ public class ILNecroBit : IObfuscationTechnique<ModuleDefinition>
                 var encrypted = XorEncrypt(serialized);
                 methodDataMap[methodId] = encrypted;
 
-                // メソッドボディを DynamicMethod 構築スタブに置換
-                ReplaceBodyWithStub(method, module, restoreMethod, methodId);
+                ReplaceBodyWithStub(method, module, importer, restoreMethod, methodId);
 
                 methodId++;
                 result.EncryptedMethodBodies++;
@@ -46,29 +47,26 @@ public class ILNecroBit : IObfuscationTechnique<ModuleDefinition>
 
         if (methodDataMap.Count > 0)
         {
-            // 暗号化データを EmbeddedResource に格納
             var resourceData = SerializeMethodDataMap(methodDataMap);
-            module.Resources.Add(new EmbeddedResource(
-                ResourceName, ManifestResourceAttributes.Private, resourceData));
+            module.Resources.Add(new EmbeddedResource(ResourceName, resourceData, ManifestResourceAttributes.Private));
         }
     }
 
-    private static bool IsEligible(MethodDefinition method)
+    private static bool IsEligible(MethodDef method)
     {
         if (!method.HasBody) return false;
         if (method.IsPublic) return false;
         if (method.IsVirtual) return false;
         if (method.IsConstructor) return false;
         if (method.HasGenericParameters) return false;
-        if (method.Body.HasExceptionHandlers) return false;
+        if (method.Body.ExceptionHandlers.Count > 0) return false;
         if (method.Body.Instructions.Count < 3) return false;
         if (method.Name == "Main") return false;
         return true;
     }
 
-    private static byte[] SerializeMethodBody(MethodDefinition method)
+    private static byte[] SerializeMethodBody(MethodDef method)
     {
-        // カスタムフォーマット: [instruction_count:4][opcode:2 + operand_type:1 + operand_data:variable]...
         using var ms = new MemoryStream();
         using var writer = new BinaryWriter(ms);
 
@@ -79,7 +77,6 @@ public class ILNecroBit : IObfuscationTechnique<ModuleDefinition>
         {
             writer.Write((short)instr.OpCode.Value);
 
-            // operand をシリアライズ
             switch (instr.OpCode.OperandType)
             {
                 case OperandType.InlineNone:
@@ -99,22 +96,22 @@ public class ILNecroBit : IObfuscationTechnique<ModuleDefinition>
                     break;
                 case OperandType.InlineString:
                     writer.Write((byte)4);
-                    var str = (string)instr.Operand;
-                    writer.Write(str);
+                    writer.Write((string)instr.Operand);
                     break;
                 case OperandType.ShortInlineI:
                     writer.Write((byte)5);
-                    if (instr.OpCode == OpCodes.Ldc_I4_S)
-                        writer.Write((sbyte)instr.Operand);
+                    if (instr.Operand is sbyte sb)
+                        writer.Write(sb);
+                    else if (instr.Operand is byte b)
+                        writer.Write(b);
                     else
-                        writer.Write((byte)instr.Operand);
+                        writer.Write((byte)0);
                     break;
                 case OperandType.ShortInlineR:
                     writer.Write((byte)6);
                     writer.Write((float)instr.Operand);
                     break;
                 default:
-                    // その他のオペランドは型情報のみ記録
                     writer.Write((byte)255);
                     break;
             }
@@ -127,9 +124,7 @@ public class ILNecroBit : IObfuscationTechnique<ModuleDefinition>
     {
         var result = new byte[data.Length];
         for (var i = 0; i < data.Length; i++)
-        {
             result[i] = (byte)(data[i] ^ XorKey);
-        }
         return result;
     }
 
@@ -150,189 +145,150 @@ public class ILNecroBit : IObfuscationTechnique<ModuleDefinition>
     }
 
     private static void ReplaceBodyWithStub(
-        MethodDefinition method,
-        ModuleDefinition module,
-        MethodDefinition restoreMethod,
-        int methodId)
+        MethodDef method, ModuleDef module, Importer importer,
+        MethodDef restoreMethod, int methodId)
     {
-        method.Body.Instructions.Clear();
-        method.Body.Variables.Clear();
-        method.Body.ExceptionHandlers.Clear();
+        var body = new CilBody();
+        method.Body = body;
+        body.InitLocals = true;
 
-        var il = method.Body.GetILProcessor();
-        method.Body.InitLocals = true;
-
-        // ヘルパー呼び出し: object result = R(methodId, new object[] { args... })
-        // methodId をプッシュ
-        il.Append(il.Create(OpCodes.Ldc_I4, methodId));
+        // R(methodId, new object[] { args... }) 呼び出し
+        body.Instructions.Add(Instruction.CreateLdcI4(methodId));
 
         // 引数配列を構築
-        var paramCount = method.Parameters.Count + (method.HasThis ? 1 : 0);
-        il.Append(il.Create(OpCodes.Ldc_I4, paramCount));
-        il.Append(il.Create(OpCodes.Newarr, module.ImportReference(typeof(object))));
+        var paramCount = method.Parameters.Count;
+        body.Instructions.Add(Instruction.CreateLdcI4(paramCount));
+        body.Instructions.Add(new Instruction(OpCodes.Newarr, module.CorLibTypes.Object.TypeDefOrRef));
 
-        var argIdx = 0;
-        if (method.HasThis)
+        for (var i = 0; i < paramCount; i++)
         {
-            il.Append(il.Create(OpCodes.Dup));
-            il.Append(il.Create(OpCodes.Ldc_I4, argIdx));
-            il.Append(il.Create(OpCodes.Ldarg_0));
-            il.Append(il.Create(OpCodes.Stelem_Ref));
-            argIdx++;
+            var param = method.Parameters[i];
+            body.Instructions.Add(new Instruction(OpCodes.Dup));
+            body.Instructions.Add(Instruction.CreateLdcI4(i));
+            body.Instructions.Add(new Instruction(OpCodes.Ldarg, param));
+            if (param.Type.IsValueType)
+                body.Instructions.Add(new Instruction(OpCodes.Box, param.Type.ToTypeDefOrRef()));
+            body.Instructions.Add(new Instruction(OpCodes.Stelem_Ref));
         }
 
-        foreach (var param in method.Parameters)
-        {
-            il.Append(il.Create(OpCodes.Dup));
-            il.Append(il.Create(OpCodes.Ldc_I4, argIdx));
-            il.Append(il.Create(OpCodes.Ldarg, param));
-            if (param.ParameterType.IsValueType)
-            {
-                il.Append(il.Create(OpCodes.Box, module.ImportReference(param.ParameterType)));
-            }
-            il.Append(il.Create(OpCodes.Stelem_Ref));
-            argIdx++;
-        }
-
-        // R(methodId, args) 呼び出し
-        il.Append(il.Create(OpCodes.Call, module.ImportReference(restoreMethod)));
+        body.Instructions.Add(new Instruction(OpCodes.Call, restoreMethod));
 
         // 戻り値を処理
-        if (method.ReturnType.FullName == "System.Void")
-        {
-            il.Append(il.Create(OpCodes.Pop));
-        }
-        else if (method.ReturnType.IsValueType)
-        {
-            il.Append(il.Create(OpCodes.Unbox_Any, module.ImportReference(method.ReturnType)));
-        }
-        else
-        {
-            il.Append(il.Create(OpCodes.Castclass, module.ImportReference(method.ReturnType)));
-        }
+        var retType = method.ReturnType;
+        if (retType.FullName == "System.Void")
+            body.Instructions.Add(new Instruction(OpCodes.Pop));
+        else if (retType.IsValueType)
+            body.Instructions.Add(new Instruction(OpCodes.Unbox_Any, retType.ToTypeDefOrRef()));
+        else if (retType.FullName != "System.Object")
+            body.Instructions.Add(new Instruction(OpCodes.Castclass, retType.ToTypeDefOrRef()));
 
-        il.Append(il.Create(OpCodes.Ret));
+        body.Instructions.Add(new Instruction(OpCodes.Ret));
     }
 
-    private static TypeDefinition InjectNecroBitHelper(ModuleDefinition module)
+    private static TypeDefUser InjectNecroBitHelper(ModuleDef module, Importer importer)
     {
-        var helperType = new TypeDefinition(
-            "",
-            "\u200C\u200D\u200B",
-            TypeAttributes.NotPublic | TypeAttributes.Sealed | TypeAttributes.Abstract,
-            module.ImportReference(typeof(object)));
+        var helperType = new TypeDefUser("", "\u200C\u200D\u200B", module.CorLibTypes.Object.TypeDefOrRef);
+        helperType.Attributes = dnlib.DotNet.TypeAttributes.NotPublic | dnlib.DotNet.TypeAttributes.Sealed
+            | dnlib.DotNet.TypeAttributes.Abstract;
 
-        // static object R(int methodId, object[] args)
-        var restoreMethod = new MethodDefinition(
+        var objectArraySig = new SZArraySig(module.CorLibTypes.Object);
+        var restoreMethod = new MethodDefUser(
             "R",
-            MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig,
-            module.ImportReference(typeof(object)));
+            MethodSig.CreateStatic(module.CorLibTypes.Object, module.CorLibTypes.Int32, objectArraySig),
+            dnlib.DotNet.MethodImplAttributes.IL | dnlib.DotNet.MethodImplAttributes.Managed,
+            dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.Static
+                | dnlib.DotNet.MethodAttributes.HideBySig);
 
-        restoreMethod.Parameters.Add(new ParameterDefinition("id", ParameterAttributes.None,
-            module.ImportReference(typeof(int))));
-        restoreMethod.Parameters.Add(new ParameterDefinition("args", ParameterAttributes.None,
-            module.ImportReference(typeof(object[]))));
+        var body = new CilBody();
+        restoreMethod.Body = body;
+        body.InitLocals = true;
 
-        var il = restoreMethod.Body.GetILProcessor();
-        restoreMethod.Body.InitLocals = true;
+        body.Variables.Add(new Local(new SZArraySig(module.CorLibTypes.Byte))); // 0: resource data
+        body.Variables.Add(new Local(importer.ImportAsTypeSig(typeof(Stream)))); // 1: stream
+        body.Variables.Add(new Local(importer.ImportAsTypeSig(typeof(BinaryReader)))); // 2: reader
+        body.Variables.Add(new Local(module.CorLibTypes.Int32)); // 3: count
+        body.Variables.Add(new Local(module.CorLibTypes.Int32)); // 4: i
+        body.Variables.Add(new Local(module.CorLibTypes.Int32)); // 5: currentId
+        body.Variables.Add(new Local(module.CorLibTypes.Int32)); // 6: dataLen
 
-        // 簡略化されたスタブ: リソースから暗号化データを読み込み、
-        // 復号して DynamicMethod で実行する代わりに、
-        // ここではプレースホルダーとして例外をスロー
-        // (実際のランタイム復号は System.Reflection.Emit が必要)
-        restoreMethod.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(byte[])))); // 0: resource data
-        restoreMethod.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(Stream)))); // 1: stream
-
-        var getExecAsm = module.ImportReference(
+        var getExecAsm = importer.Import(
             typeof(System.Reflection.Assembly).GetMethod("GetExecutingAssembly")!);
-        var getManifestStream = module.ImportReference(
+        var getManifestStream = importer.Import(
             typeof(System.Reflection.Assembly).GetMethod("GetManifestResourceStream", [typeof(string)])!);
+        var brCtor = importer.Import(typeof(BinaryReader).GetConstructor([typeof(Stream)])!);
+        var readInt32 = importer.Import(typeof(BinaryReader).GetMethod("ReadInt32")!);
+        var readBytes = importer.Import(typeof(BinaryReader).GetMethod("ReadBytes", [typeof(int)])!);
 
         // stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(ResourceName)
-        il.Append(il.Create(OpCodes.Call, getExecAsm));
-        il.Append(il.Create(OpCodes.Ldstr, ResourceName));
-        il.Append(il.Create(OpCodes.Callvirt, getManifestStream));
-        il.Append(il.Create(OpCodes.Stloc_1));
+        body.Instructions.Add(new Instruction(OpCodes.Call, getExecAsm));
+        body.Instructions.Add(new Instruction(OpCodes.Ldstr, ResourceName));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, getManifestStream));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc_1));
 
         // ストリームがない場合は null を返す
-        var hasStream = il.Create(OpCodes.Ldloc_1);
-        il.Append(il.Create(OpCodes.Ldloc_1));
-        il.Append(il.Create(OpCodes.Brtrue, hasStream));
-        il.Append(il.Create(OpCodes.Ldnull));
-        il.Append(il.Create(OpCodes.Ret));
+        var hasStream = new Instruction(OpCodes.Ldloc_1);
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_1));
+        body.Instructions.Add(new Instruction(OpCodes.Brtrue, hasStream));
+        body.Instructions.Add(new Instruction(OpCodes.Ldnull));
+        body.Instructions.Add(new Instruction(OpCodes.Ret));
 
-        // BinaryReader で methodId に対応するデータを読む
-        var brCtor = module.ImportReference(
-            typeof(BinaryReader).GetConstructor([typeof(Stream)])!);
-        var readInt32 = module.ImportReference(
-            typeof(BinaryReader).GetMethod("ReadInt32")!);
-        var readBytes = module.ImportReference(
-            typeof(BinaryReader).GetMethod("ReadBytes", [typeof(int)])!);
+        // reader = new BinaryReader(stream)
+        body.Instructions.Add(hasStream);
+        body.Instructions.Add(new Instruction(OpCodes.Newobj, brCtor));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc_2));
 
-        restoreMethod.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(BinaryReader)))); // 2: reader
-        restoreMethod.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(int)))); // 3: count
-        restoreMethod.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(int)))); // 4: i
-        restoreMethod.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(int)))); // 5: currentId
-        restoreMethod.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(int)))); // 6: dataLen
-
-        il.Append(hasStream);
-        il.Append(il.Create(OpCodes.Newobj, brCtor));
-        il.Append(il.Create(OpCodes.Stloc_2));
-
-        // count = reader.ReadInt32();
-        il.Append(il.Create(OpCodes.Ldloc_2));
-        il.Append(il.Create(OpCodes.Callvirt, readInt32));
-        il.Append(il.Create(OpCodes.Stloc_3));
+        // count = reader.ReadInt32()
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_2));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, readInt32));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc_3));
 
         // for (i = 0; i < count; i++)
-        il.Append(il.Create(OpCodes.Ldc_I4_0));
-        il.Append(il.Create(OpCodes.Stloc, 4));
+        body.Instructions.Add(Instruction.CreateLdcI4(0));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc, body.Variables[4]));
 
-        var loopCheck = il.Create(OpCodes.Ldloc, 4);
-        var loopBody = il.Create(OpCodes.Ldloc_2);
-        il.Append(il.Create(OpCodes.Br, loopCheck));
+        var loopCheck = new Instruction(OpCodes.Ldloc, body.Variables[4]);
+        var loopBody = new Instruction(OpCodes.Ldloc_2);
+        body.Instructions.Add(new Instruction(OpCodes.Br, loopCheck));
 
-        // currentId = reader.ReadInt32();
-        il.Append(loopBody);
-        il.Append(il.Create(OpCodes.Callvirt, readInt32));
-        il.Append(il.Create(OpCodes.Stloc, 5));
+        // currentId = reader.ReadInt32()
+        body.Instructions.Add(loopBody);
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, readInt32));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc, body.Variables[5]));
 
-        // dataLen = reader.ReadInt32();
-        il.Append(il.Create(OpCodes.Ldloc_2));
-        il.Append(il.Create(OpCodes.Callvirt, readInt32));
-        il.Append(il.Create(OpCodes.Stloc, 6));
+        // dataLen = reader.ReadInt32()
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_2));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, readInt32));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc, body.Variables[6]));
 
-        // data = reader.ReadBytes(dataLen);
-        il.Append(il.Create(OpCodes.Ldloc_2));
-        il.Append(il.Create(OpCodes.Ldloc, 6));
-        il.Append(il.Create(OpCodes.Callvirt, readBytes));
-        il.Append(il.Create(OpCodes.Stloc_0));
+        // data = reader.ReadBytes(dataLen)
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_2));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc, body.Variables[6]));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, readBytes));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc_0));
 
         // if (currentId == methodId) → found
-        var skipLabel = il.Create(OpCodes.Ldloc, 4);
-        il.Append(il.Create(OpCodes.Ldloc, 5));
-        il.Append(il.Create(OpCodes.Ldarg_0));
-        il.Append(il.Create(OpCodes.Bne_Un, skipLabel));
+        var skipLabel = new Instruction(OpCodes.Ldloc, body.Variables[4]);
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc, body.Variables[5]));
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_0));
+        body.Instructions.Add(new Instruction(OpCodes.Bne_Un, skipLabel));
 
-        // 一致: XOR 復号して結果を返す (簡略化: データの存在確認のみ)
-        // 実際には DynamicMethod を使用するが、ここではデータが見つかったことを示す
-        il.Append(il.Create(OpCodes.Ldnull));
-        il.Append(il.Create(OpCodes.Ret));
+        // 一致: null を返す
+        body.Instructions.Add(new Instruction(OpCodes.Ldnull));
+        body.Instructions.Add(new Instruction(OpCodes.Ret));
 
         // i++
-        il.Append(skipLabel);
-        il.Append(il.Create(OpCodes.Ldc_I4_1));
-        il.Append(il.Create(OpCodes.Add));
-        il.Append(il.Create(OpCodes.Stloc, 4));
+        body.Instructions.Add(skipLabel);
+        body.Instructions.Add(Instruction.CreateLdcI4(1));
+        body.Instructions.Add(new Instruction(OpCodes.Add));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc, body.Variables[4]));
 
-        // i < count
-        il.Append(loopCheck);
-        il.Append(il.Create(OpCodes.Ldloc_3));
-        il.Append(il.Create(OpCodes.Blt, loopBody));
+        body.Instructions.Add(loopCheck);
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_3));
+        body.Instructions.Add(new Instruction(OpCodes.Blt, loopBody));
 
         // not found
-        il.Append(il.Create(OpCodes.Ldnull));
-        il.Append(il.Create(OpCodes.Ret));
+        body.Instructions.Add(new Instruction(OpCodes.Ldnull));
+        body.Instructions.Add(new Instruction(OpCodes.Ret));
 
         helperType.Methods.Add(restoreMethod);
         module.Types.Add(helperType);

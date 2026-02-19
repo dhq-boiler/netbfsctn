@@ -1,19 +1,20 @@
-using Mono.Cecil;
-using Mono.Cecil.Cil;
+using dnlib.DotNet;
+using dnlib.DotNet.Emit;
 using Netbfsctn.Core.Pipeline;
 using Netbfsctn.Core.Techniques;
 
 namespace Netbfsctn.IL.Techniques;
 
-public class ILAntiDebug : IObfuscationTechnique<ModuleDefinition>
+public class ILAntiDebug : IObfuscationTechnique<ModuleDef>
 {
     public string Name => "Anti-Debug (IL)";
 
-    public void Apply(ModuleDefinition module, ObfuscationContext context, ObfuscationResult result)
+    public void Apply(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
     {
-        var isAttachedRef = module.ImportReference(
+        var importer = new Importer(module);
+        var isAttachedRef = importer.Import(
             typeof(System.Diagnostics.Debugger).GetProperty("IsAttached")!.GetGetMethod()!);
-        var exitRef = module.ImportReference(
+        var exitRef = importer.Import(
             typeof(Environment).GetMethod("Exit", [typeof(int)])!);
 
         // モジュール初期化子にデバッガ検出コードを注入
@@ -35,7 +36,7 @@ public class ILAntiDebug : IObfuscationTechnique<ModuleDefinition>
                 // 約30%のメソッドにチェックを分散挿入
                 if (random.Next(100) < 30)
                 {
-                    InjectDebugCheck(method, module, isAttachedRef, exitRef);
+                    InjectDebugCheck(method, isAttachedRef, exitRef);
                 }
             }
         }
@@ -45,44 +46,46 @@ public class ILAntiDebug : IObfuscationTechnique<ModuleDefinition>
     }
 
     private static void InjectIntoModuleCctor(
-        ModuleDefinition module,
-        MethodReference isAttachedRef,
-        MethodReference exitRef)
+        ModuleDef module,
+        IMethod isAttachedRef,
+        IMethod exitRef)
     {
-        var moduleType = module.Types.First(t => t.Name == "<Module>");
+        var moduleType = module.GlobalType;
 
-        var cctor = moduleType.Methods.FirstOrDefault(m => m.Name == ".cctor");
+        var cctor = moduleType.FindStaticConstructor();
         if (cctor == null)
         {
-            cctor = new MethodDefinition(
+            cctor = new MethodDefUser(
                 ".cctor",
-                MethodAttributes.Static | MethodAttributes.Private | MethodAttributes.HideBySig
-                    | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName,
-                module.ImportReference(typeof(void)));
-            cctor.Body.GetILProcessor().Append(
-                cctor.Body.GetILProcessor().Create(OpCodes.Ret));
+                MethodSig.CreateStatic(module.CorLibTypes.Void),
+                dnlib.DotNet.MethodImplAttributes.IL | dnlib.DotNet.MethodImplAttributes.Managed,
+                dnlib.DotNet.MethodAttributes.Static | dnlib.DotNet.MethodAttributes.Private
+                    | dnlib.DotNet.MethodAttributes.HideBySig
+                    | dnlib.DotNet.MethodAttributes.SpecialName | dnlib.DotNet.MethodAttributes.RTSpecialName);
+            cctor.Body = new CilBody();
+            cctor.Body.Instructions.Add(new Instruction(OpCodes.Ret));
             moduleType.Methods.Add(cctor);
         }
 
-        InjectDebugCheck(cctor, module, isAttachedRef, exitRef);
+        InjectDebugCheck(cctor, isAttachedRef, exitRef);
     }
 
     private static void InjectDebugCheck(
-        MethodDefinition method,
-        ModuleDefinition module,
-        MethodReference isAttachedRef,
-        MethodReference exitRef)
+        MethodDef method,
+        IMethod isAttachedRef,
+        IMethod exitRef)
     {
-        var il = method.Body.GetILProcessor();
-        var firstInstruction = method.Body.Instructions[0];
+        var body = method.Body;
+        var firstInstruction = body.Instructions[0];
+        var idx = 0;
 
         // if (Debugger.IsAttached) Environment.Exit(-1);
-        var skipLabel = il.Create(OpCodes.Nop);
+        var skipLabel = new Instruction(OpCodes.Nop);
 
-        il.InsertBefore(firstInstruction, il.Create(OpCodes.Call, isAttachedRef));
-        il.InsertBefore(firstInstruction, il.Create(OpCodes.Brfalse, skipLabel));
-        il.InsertBefore(firstInstruction, il.Create(OpCodes.Ldc_I4_M1));
-        il.InsertBefore(firstInstruction, il.Create(OpCodes.Call, exitRef));
-        il.InsertBefore(firstInstruction, skipLabel);
+        body.Instructions.Insert(idx++, new Instruction(OpCodes.Call, isAttachedRef));
+        body.Instructions.Insert(idx++, new Instruction(OpCodes.Brfalse, skipLabel));
+        body.Instructions.Insert(idx++, new Instruction(OpCodes.Ldc_I4_M1));
+        body.Instructions.Insert(idx++, new Instruction(OpCodes.Call, exitRef));
+        body.Instructions.Insert(idx, skipLabel);
     }
 }

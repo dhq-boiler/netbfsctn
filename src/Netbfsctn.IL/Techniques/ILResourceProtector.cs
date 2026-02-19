@@ -1,52 +1,54 @@
 using System.IO.Compression;
-using Mono.Cecil;
-using Mono.Cecil.Cil;
+using dnlib.DotNet;
+using dnlib.DotNet.Emit;
 using Netbfsctn.Core.Pipeline;
 using Netbfsctn.Core.Techniques;
 
 namespace Netbfsctn.IL.Techniques;
 
-public class ILResourceProtector : IObfuscationTechnique<ModuleDefinition>
+public class ILResourceProtector : IObfuscationTechnique<ModuleDef>
 {
     public string Name => "リソース保護 (IL)";
 
     private const string EncPrefix = "__enc__";
     private const byte XorKey = 0xAB;
 
-    public void Apply(ModuleDefinition module, ObfuscationContext context, ObfuscationResult result)
+    public void Apply(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
     {
+        var importer = new Importer(module);
+
         // 復号ヘルパー型を注入
-        var helperType = InjectResourceHelper(module);
+        var helperType = InjectResourceHelper(module, importer);
 
         var resources = module.Resources.OfType<EmbeddedResource>().ToList();
         foreach (var resource in resources)
         {
-            // 自分が追加したリソースや他のテクニックのリソースはスキップ
-            if (resource.Name.StartsWith(EncPrefix))
+            if (resource.Name.String.StartsWith(EncPrefix))
                 continue;
 
-            var data = resource.GetResourceData();
+            var data = resource.CreateReader().ToArray();
 
-            // GZip 圧縮 → XOR 暗号化
             var compressed = GZipCompress(data);
             var encrypted = XorEncrypt(compressed);
 
-            // 元のリソースを暗号化版に置換
             module.Resources.Remove(resource);
-            var encResource = new EmbeddedResource(
-                EncPrefix + resource.Name,
-                resource.Attributes,
-                encrypted);
-            module.Resources.Add(encResource);
+            module.Resources.Add(new EmbeddedResource(
+                EncPrefix + resource.Name.String, encrypted, ManifestResourceAttributes.Private));
 
             result.ProtectedResources++;
             context.Logger.Verbose($"リソース保護: {resource.Name}");
         }
 
-        // リソース名マッピングテーブルを初期化子に登録
         if (result.ProtectedResources > 0)
         {
-            InjectMappingInit(module, helperType, resources);
+            // プレフィックス定数フィールドを追加
+            var prefixField = new FieldDefUser(
+                "P",
+                new FieldSig(module.CorLibTypes.String),
+                dnlib.DotNet.FieldAttributes.Public | dnlib.DotNet.FieldAttributes.Static
+                    | dnlib.DotNet.FieldAttributes.Literal);
+            prefixField.Constant = module.UpdateRowId(new ConstantUser(EncPrefix));
+            helperType.Fields.Add(prefixField);
         }
     }
 
@@ -54,9 +56,7 @@ public class ILResourceProtector : IObfuscationTechnique<ModuleDefinition>
     {
         using var ms = new MemoryStream();
         using (var gz = new GZipStream(ms, CompressionLevel.Optimal))
-        {
             gz.Write(data, 0, data.Length);
-        }
         return ms.ToArray();
     }
 
@@ -64,135 +64,106 @@ public class ILResourceProtector : IObfuscationTechnique<ModuleDefinition>
     {
         var result = new byte[data.Length];
         for (var i = 0; i < data.Length; i++)
-        {
             result[i] = (byte)(data[i] ^ XorKey);
-        }
         return result;
     }
 
-    private static TypeDefinition InjectResourceHelper(ModuleDefinition module)
+    private static TypeDefUser InjectResourceHelper(ModuleDef module, Importer importer)
     {
-        var helperType = new TypeDefinition(
-            "",
-            "\u200B\u200C\u200B\u200D",
-            TypeAttributes.NotPublic | TypeAttributes.Sealed | TypeAttributes.Abstract,
-            module.ImportReference(typeof(object)));
+        var helperType = new TypeDefUser("", "\u200B\u200C\u200B\u200D", module.CorLibTypes.Object.TypeDefOrRef);
+        helperType.Attributes = dnlib.DotNet.TypeAttributes.NotPublic | dnlib.DotNet.TypeAttributes.Sealed
+            | dnlib.DotNet.TypeAttributes.Abstract;
 
-        // static byte[] Decrypt(byte[] data) メソッド
-        var decryptMethod = new MethodDefinition(
+        var byteArraySig = new SZArraySig(module.CorLibTypes.Byte);
+
+        // static byte[] R(byte[] data)
+        var decryptMethod = new MethodDefUser(
             "R",
-            MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig,
-            module.ImportReference(typeof(byte[])));
+            MethodSig.CreateStatic(byteArraySig, byteArraySig),
+            dnlib.DotNet.MethodImplAttributes.IL | dnlib.DotNet.MethodImplAttributes.Managed,
+            dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.Static
+                | dnlib.DotNet.MethodAttributes.HideBySig);
 
-        decryptMethod.Parameters.Add(new ParameterDefinition("d", ParameterAttributes.None,
-            module.ImportReference(typeof(byte[]))));
+        var body = new CilBody();
+        decryptMethod.Body = body;
+        body.InitLocals = true;
 
-        var il = decryptMethod.Body.GetILProcessor();
-        decryptMethod.Body.InitLocals = true;
+        body.Variables.Add(new Local(byteArraySig)); // 0: xored
+        body.Variables.Add(new Local(importer.ImportAsTypeSig(typeof(MemoryStream)))); // 1: ms
+        body.Variables.Add(new Local(importer.ImportAsTypeSig(typeof(GZipStream)))); // 2: gz
+        body.Variables.Add(new Local(importer.ImportAsTypeSig(typeof(MemoryStream)))); // 3: outMs
+        body.Variables.Add(new Local(module.CorLibTypes.Int32)); // 4: i
 
-        // ローカル変数: byte[] xored, MemoryStream ms, GZipStream gz, MemoryStream outMs
-        decryptMethod.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(byte[]))));
-        decryptMethod.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(MemoryStream))));
-        decryptMethod.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(GZipStream))));
-        decryptMethod.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(MemoryStream))));
-
-        // XOR 復号ループ
         // byte[] xored = new byte[d.Length];
-        il.Append(il.Create(OpCodes.Ldarg_0));
-        il.Append(il.Create(OpCodes.Ldlen));
-        il.Append(il.Create(OpCodes.Conv_I4));
-        il.Append(il.Create(OpCodes.Newarr, module.ImportReference(typeof(byte))));
-        il.Append(il.Create(OpCodes.Stloc_0));
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_0));
+        body.Instructions.Add(new Instruction(OpCodes.Ldlen));
+        body.Instructions.Add(new Instruction(OpCodes.Conv_I4));
+        body.Instructions.Add(new Instruction(OpCodes.Newarr, module.CorLibTypes.Byte.TypeDefOrRef));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc_0));
 
-        // for ループ用変数
-        var iVar = new VariableDefinition(module.ImportReference(typeof(int)));
-        decryptMethod.Body.Variables.Add(iVar); // index 4
+        // i = 0
+        body.Instructions.Add(Instruction.CreateLdcI4(0));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc, body.Variables[4]));
 
-        il.Append(il.Create(OpCodes.Ldc_I4_0));
-        il.Append(il.Create(OpCodes.Stloc, 4));
-
-        var loopStart = il.Create(OpCodes.Ldloc, 4);
-        var loopBody = il.Create(OpCodes.Ldloc_0);
-        il.Append(il.Create(OpCodes.Br, loopStart));
+        var loopStart = new Instruction(OpCodes.Ldloc, body.Variables[4]);
+        var loopBody = new Instruction(OpCodes.Ldloc_0);
+        body.Instructions.Add(new Instruction(OpCodes.Br, loopStart));
 
         // xored[i] = (byte)(d[i] ^ 0xAB)
-        il.Append(loopBody);
-        il.Append(il.Create(OpCodes.Ldloc, 4));
-        il.Append(il.Create(OpCodes.Ldarg_0));
-        il.Append(il.Create(OpCodes.Ldloc, 4));
-        il.Append(il.Create(OpCodes.Ldelem_U1));
-        il.Append(il.Create(OpCodes.Ldc_I4, (int)XorKey));
-        il.Append(il.Create(OpCodes.Xor));
-        il.Append(il.Create(OpCodes.Conv_U1));
-        il.Append(il.Create(OpCodes.Stelem_I1));
+        body.Instructions.Add(loopBody);
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc, body.Variables[4]));
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_0));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc, body.Variables[4]));
+        body.Instructions.Add(new Instruction(OpCodes.Ldelem_U1));
+        body.Instructions.Add(Instruction.CreateLdcI4(XorKey));
+        body.Instructions.Add(new Instruction(OpCodes.Xor));
+        body.Instructions.Add(new Instruction(OpCodes.Conv_U1));
+        body.Instructions.Add(new Instruction(OpCodes.Stelem_I1));
 
         // i++
-        il.Append(il.Create(OpCodes.Ldloc, 4));
-        il.Append(il.Create(OpCodes.Ldc_I4_1));
-        il.Append(il.Create(OpCodes.Add));
-        il.Append(il.Create(OpCodes.Stloc, 4));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc, body.Variables[4]));
+        body.Instructions.Add(Instruction.CreateLdcI4(1));
+        body.Instructions.Add(new Instruction(OpCodes.Add));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc, body.Variables[4]));
 
         // i < d.Length
-        il.Append(loopStart);
-        il.Append(il.Create(OpCodes.Ldarg_0));
-        il.Append(il.Create(OpCodes.Ldlen));
-        il.Append(il.Create(OpCodes.Conv_I4));
-        il.Append(il.Create(OpCodes.Blt, loopBody));
+        body.Instructions.Add(loopStart);
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_0));
+        body.Instructions.Add(new Instruction(OpCodes.Ldlen));
+        body.Instructions.Add(new Instruction(OpCodes.Conv_I4));
+        body.Instructions.Add(new Instruction(OpCodes.Blt, loopBody));
 
-        // GZip 解凍: MemoryStream → GZipStream → CopyTo → ToArray
-        var msCtorBytes = module.ImportReference(
-            typeof(MemoryStream).GetConstructor([typeof(byte[])])!);
-        var msCtor = module.ImportReference(
-            typeof(MemoryStream).GetConstructor(Type.EmptyTypes)!);
-        var gzCtor = module.ImportReference(
+        // GZip 解凍
+        var msCtorBytes = importer.Import(typeof(MemoryStream).GetConstructor([typeof(byte[])])!);
+        var msCtor = importer.Import(typeof(MemoryStream).GetConstructor(Type.EmptyTypes)!);
+        var gzCtor = importer.Import(
             typeof(GZipStream).GetConstructor([typeof(Stream), typeof(CompressionMode)])!);
-        var copyTo = module.ImportReference(
-            typeof(Stream).GetMethod("CopyTo", [typeof(Stream)])!);
-        var toArray = module.ImportReference(
-            typeof(MemoryStream).GetMethod("ToArray")!);
+        var copyTo = importer.Import(typeof(Stream).GetMethod("CopyTo", [typeof(Stream)])!);
+        var toArray = importer.Import(typeof(MemoryStream).GetMethod("ToArray")!);
 
-        // var ms = new MemoryStream(xored);
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Newobj, msCtorBytes));
-        il.Append(il.Create(OpCodes.Stloc_1));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_0));
+        body.Instructions.Add(new Instruction(OpCodes.Newobj, msCtorBytes));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc_1));
 
-        // var gz = new GZipStream(ms, CompressionMode.Decompress);
-        il.Append(il.Create(OpCodes.Ldloc_1));
-        il.Append(il.Create(OpCodes.Ldc_I4_0)); // CompressionMode.Decompress = 0
-        il.Append(il.Create(OpCodes.Newobj, gzCtor));
-        il.Append(il.Create(OpCodes.Stloc_2));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_1));
+        body.Instructions.Add(Instruction.CreateLdcI4(0)); // CompressionMode.Decompress
+        body.Instructions.Add(new Instruction(OpCodes.Newobj, gzCtor));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc_2));
 
-        // var outMs = new MemoryStream();
-        il.Append(il.Create(OpCodes.Newobj, msCtor));
-        il.Append(il.Create(OpCodes.Stloc_3));
+        body.Instructions.Add(new Instruction(OpCodes.Newobj, msCtor));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc_3));
 
-        // gz.CopyTo(outMs);
-        il.Append(il.Create(OpCodes.Ldloc_2));
-        il.Append(il.Create(OpCodes.Ldloc_3));
-        il.Append(il.Create(OpCodes.Callvirt, copyTo));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_2));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_3));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, copyTo));
 
-        // return outMs.ToArray();
-        il.Append(il.Create(OpCodes.Ldloc_3));
-        il.Append(il.Create(OpCodes.Callvirt, toArray));
-        il.Append(il.Create(OpCodes.Ret));
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_3));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, toArray));
+        body.Instructions.Add(new Instruction(OpCodes.Ret));
 
         helperType.Methods.Add(decryptMethod);
         module.Types.Add(helperType);
 
         return helperType;
-    }
-
-    private static void InjectMappingInit(
-        ModuleDefinition module,
-        TypeDefinition helperType,
-        List<EmbeddedResource> originalResources)
-    {
-        // ヘルパー型にリソース名プレフィックス定数を保持するフィールドを追加
-        var prefixField = new FieldDefinition(
-            "P",
-            FieldAttributes.Public | FieldAttributes.Static | FieldAttributes.Literal,
-            module.ImportReference(typeof(string)));
-        prefixField.Constant = EncPrefix;
-        helperType.Fields.Add(prefixField);
     }
 }

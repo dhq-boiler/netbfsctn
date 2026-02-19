@@ -1,18 +1,20 @@
-using Mono.Cecil;
-using Mono.Cecil.Cil;
+using dnlib.DotNet;
+using dnlib.DotNet.Emit;
 using Netbfsctn.Core.Pipeline;
 using Netbfsctn.Core.Techniques;
 
 namespace Netbfsctn.IL.Techniques;
 
-public class ILHideMethodCalls : IObfuscationTechnique<ModuleDefinition>
+public class ILHideMethodCalls : IObfuscationTechnique<ModuleDef>
 {
     public string Name => "呼び出し隠蔽 (IL)";
 
-    public void Apply(ModuleDefinition module, ObfuscationContext context, ObfuscationResult result)
+    public void Apply(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
     {
+        var importer = new Importer(module);
+
         // ヘルパー型を注入
-        var helperType = InjectCallHelper(module);
+        var helperType = InjectCallHelper(module, importer);
         var invokeMethod = helperType.Methods.First(m => m.Name == "I");
 
         foreach (var type in module.Types.ToList())
@@ -23,65 +25,47 @@ public class ILHideMethodCalls : IObfuscationTechnique<ModuleDefinition>
             foreach (var method in type.Methods.ToList())
             {
                 if (!method.HasBody) continue;
-                if (method.Body.HasExceptionHandlers) continue;
+                if (method.Body.ExceptionHandlers.Count > 0) continue;
 
-                HideCalls(method, module, invokeMethod, context, result);
+                HideCalls(method, module, importer, invokeMethod, context, result);
             }
         }
     }
 
     private static void HideCalls(
-        MethodDefinition method,
-        ModuleDefinition module,
-        MethodDefinition invokeMethod,
-        ObfuscationContext context,
-        ObfuscationResult result)
+        MethodDef method, ModuleDef module, Importer importer,
+        MethodDef invokeMethod, ObfuscationContext context, ObfuscationResult result)
     {
-        var il = method.Body.GetILProcessor();
-        var instructions = method.Body.Instructions.ToList();
+        var body = method.Body;
+        var instructions = body.Instructions.ToList();
 
         foreach (var instr in instructions)
         {
             if (instr.OpCode != OpCodes.Call && instr.OpCode != OpCodes.Callvirt)
                 continue;
 
-            if (instr.Operand is not MethodReference targetMethod)
+            if (instr.Operand is not IMethod targetMethod)
                 continue;
 
-            // BCL 呼び出しは除外 (System.*, Microsoft.* 名前空間)
-            var declaringTypeName = targetMethod.DeclaringType.FullName;
-            if (declaringTypeName.StartsWith("System.") ||
-                declaringTypeName.StartsWith("Microsoft.") ||
-                declaringTypeName.StartsWith("System/") ||
-                string.IsNullOrEmpty(declaringTypeName))
+            var declaringTypeName = targetMethod.DeclaringType?.FullName ?? "";
+            if (declaringTypeName.StartsWith("System.") || declaringTypeName.StartsWith("Microsoft.")
+                || string.IsNullOrEmpty(declaringTypeName))
                 continue;
 
-            // コンストラクタは除外
             if (targetMethod.Name == ".ctor" || targetMethod.Name == ".cctor")
                 continue;
 
-            // ジェネリックメソッドは除外
-            if (targetMethod.HasGenericParameters)
-                continue;
-            if (targetMethod is GenericInstanceMethod)
-                continue;
+            var methodSig = targetMethod.MethodSig;
+            if (methodSig == null) continue;
+            if (methodSig.GenParamCount > 0) continue;
+            if (methodSig.RetType.FullName == "System.Void") continue;
+            if (methodSig.Params.Count > 8) continue;
 
-            // 戻り値が void 以外の場合のみ対象 (void の間接呼び出しは複雑なため)
-            if (targetMethod.ReturnType.FullName == "System.Void")
-                continue;
-
-            // パラメータ数が多すぎる場合はスキップ
-            if (targetMethod.Parameters.Count > 8)
-                continue;
-
-            var resolved = targetMethod.Resolve();
+            var resolved = (targetMethod as MethodDef) ?? (targetMethod as MemberRef)?.ResolveMethod();
             if (resolved == null) continue;
-
-            // public メソッドは除外 (private/internal のみ対象)
             if (resolved.IsPublic) continue;
 
-            // 引数を object[] 配列に収集 → ヘルパー呼び出しに置換
-            ReplaceWithReflectionCall(il, instr, targetMethod, module, invokeMethod);
+            ReplaceWithReflectionCall(body, instr, targetMethod, module, importer, invokeMethod);
 
             result.HiddenMethodCalls++;
             context.Logger.Verbose($"呼び出し隠蔽: {targetMethod.Name} in {method.Name}");
@@ -89,160 +73,143 @@ public class ILHideMethodCalls : IObfuscationTechnique<ModuleDefinition>
     }
 
     private static void ReplaceWithReflectionCall(
-        ILProcessor il,
-        Instruction callInstr,
-        MethodReference targetMethod,
-        ModuleDefinition module,
-        MethodDefinition invokeMethod)
+        CilBody body, Instruction callInstr, IMethod targetMethod,
+        ModuleDef module, Importer importer, MethodDef invokeMethod)
     {
-        var paramCount = targetMethod.Parameters.Count;
-        var isInstance = callInstr.OpCode == OpCodes.Callvirt || targetMethod.HasThis;
+        var methodSig = targetMethod.MethodSig;
+        var paramCount = methodSig!.Params.Count;
 
-        // 新しい命令リスト
         var newInstructions = new List<Instruction>();
 
-        // typeName 引数
-        newInstructions.Add(il.Create(OpCodes.Ldstr, targetMethod.DeclaringType.FullName));
+        // typeName
+        newInstructions.Add(new Instruction(OpCodes.Ldstr, targetMethod.DeclaringType.FullName));
+        // methodName
+        newInstructions.Add(new Instruction(OpCodes.Ldstr, targetMethod.Name.String));
 
-        // methodName 引数
-        newInstructions.Add(il.Create(OpCodes.Ldstr, targetMethod.Name));
+        // paramTypes: Type[] 配列
+        var typeTypeRef = importer.Import(typeof(Type));
+        var getTypeFromHandle = importer.Import(typeof(Type).GetMethod("GetTypeFromHandle",
+            [typeof(RuntimeTypeHandle)])!);
 
-        // paramTypes 引数: Type[] 配列
-        newInstructions.Add(il.Create(OpCodes.Ldc_I4, paramCount));
-        newInstructions.Add(il.Create(OpCodes.Newarr, module.ImportReference(typeof(Type))));
+        newInstructions.Add(Instruction.CreateLdcI4(paramCount));
+        newInstructions.Add(new Instruction(OpCodes.Newarr, typeTypeRef));
 
         for (var i = 0; i < paramCount; i++)
         {
-            newInstructions.Add(il.Create(OpCodes.Dup));
-            newInstructions.Add(il.Create(OpCodes.Ldc_I4, i));
-
-            var paramType = targetMethod.Parameters[i].ParameterType;
-            newInstructions.Add(il.Create(OpCodes.Ldtoken, module.ImportReference(paramType)));
-            var getTypeFromHandle = module.ImportReference(
-                typeof(Type).GetMethod("GetTypeFromHandle", [typeof(RuntimeTypeHandle)])!);
-            newInstructions.Add(il.Create(OpCodes.Call, getTypeFromHandle));
-            newInstructions.Add(il.Create(OpCodes.Stelem_Ref));
+            newInstructions.Add(new Instruction(OpCodes.Dup));
+            newInstructions.Add(Instruction.CreateLdcI4(i));
+            var paramType = methodSig.Params[i].ToTypeDefOrRef();
+            newInstructions.Add(new Instruction(OpCodes.Ldtoken, paramType));
+            newInstructions.Add(new Instruction(OpCodes.Call, getTypeFromHandle));
+            newInstructions.Add(new Instruction(OpCodes.Stelem_Ref));
         }
 
-        // args 引数: object[] 配列 (スタック上の引数を配列に詰め替え)
-        // 注: 呼び出し前にスタック上に引数が積まれているので、
-        //     ローカル変数に一時退避してから配列に詰める
-        // これは複雑なので、簡略化: 引数なしのメソッドのみ対象
-        // (引数ありの場合は null を渡す → リフレクション側で処理)
-        newInstructions.Add(il.Create(OpCodes.Ldnull)); // args = null (引数なし想定)
+        // args = null
+        newInstructions.Add(new Instruction(OpCodes.Ldnull));
 
         // ヘルパー呼び出し
-        newInstructions.Add(il.Create(OpCodes.Call, module.ImportReference(invokeMethod)));
+        newInstructions.Add(new Instruction(OpCodes.Call, invokeMethod));
 
         // 戻り値を適切な型に変換
-        var returnType = targetMethod.ReturnType;
+        var returnType = methodSig.RetType;
         if (returnType.IsValueType)
-        {
-            newInstructions.Add(il.Create(OpCodes.Unbox_Any, module.ImportReference(returnType)));
-        }
+            newInstructions.Add(new Instruction(OpCodes.Unbox_Any, returnType.ToTypeDefOrRef()));
         else if (returnType.FullName != "System.Object")
-        {
-            newInstructions.Add(il.Create(OpCodes.Castclass, module.ImportReference(returnType)));
-        }
+            newInstructions.Add(new Instruction(OpCodes.Castclass, returnType.ToTypeDefOrRef()));
 
         // 元の call 命令を置換
-        var first = newInstructions[0];
-        il.Replace(callInstr, first);
+        var idx = body.Instructions.IndexOf(callInstr);
+        body.Instructions[idx] = newInstructions[0];
 
-        var prev = first;
-        for (var i = 1; i < newInstructions.Count; i++)
+        // 分岐ターゲットの更新
+        foreach (var instr in body.Instructions)
         {
-            il.InsertAfter(prev, newInstructions[i]);
-            prev = newInstructions[i];
+            if (instr.Operand == callInstr)
+                instr.Operand = newInstructions[0];
+            if (instr.Operand is Instruction[] targets)
+                for (var i = 0; i < targets.Length; i++)
+                    if (targets[i] == callInstr)
+                        targets[i] = newInstructions[0];
         }
+
+        for (var i = 1; i < newInstructions.Count; i++)
+            body.Instructions.Insert(idx + i, newInstructions[i]);
     }
 
-    private static TypeDefinition InjectCallHelper(ModuleDefinition module)
+    private static TypeDefUser InjectCallHelper(ModuleDef module, Importer importer)
     {
-        var helperType = new TypeDefinition(
-            "",
-            "\u200D\u200B\u200C",
-            TypeAttributes.NotPublic | TypeAttributes.Sealed | TypeAttributes.Abstract,
-            module.ImportReference(typeof(object)));
+        var helperType = new TypeDefUser("", "\u200D\u200B\u200C", module.CorLibTypes.Object.TypeDefOrRef);
+        helperType.Attributes = dnlib.DotNet.TypeAttributes.NotPublic | dnlib.DotNet.TypeAttributes.Sealed
+            | dnlib.DotNet.TypeAttributes.Abstract;
 
-        // static object I(string typeName, string methodName, Type[] paramTypes, object[] args)
-        var invokeMethod = new MethodDefinition(
+        var typeArraySig = new SZArraySig(importer.ImportAsTypeSig(typeof(Type)));
+        var objectArraySig = new SZArraySig(module.CorLibTypes.Object);
+
+        var invokeMethod = new MethodDefUser(
             "I",
-            MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig,
-            module.ImportReference(typeof(object)));
+            MethodSig.CreateStatic(module.CorLibTypes.Object,
+                module.CorLibTypes.String, module.CorLibTypes.String, typeArraySig, objectArraySig),
+            dnlib.DotNet.MethodImplAttributes.IL | dnlib.DotNet.MethodImplAttributes.Managed,
+            dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.Static
+                | dnlib.DotNet.MethodAttributes.HideBySig);
 
-        invokeMethod.Parameters.Add(new ParameterDefinition("t", ParameterAttributes.None,
-            module.ImportReference(typeof(string))));
-        invokeMethod.Parameters.Add(new ParameterDefinition("m", ParameterAttributes.None,
-            module.ImportReference(typeof(string))));
-        invokeMethod.Parameters.Add(new ParameterDefinition("p", ParameterAttributes.None,
-            module.ImportReference(typeof(Type[]))));
-        invokeMethod.Parameters.Add(new ParameterDefinition("a", ParameterAttributes.None,
-            module.ImportReference(typeof(object[]))));
+        var body = new CilBody();
+        invokeMethod.Body = body;
+        body.InitLocals = true;
 
-        var il = invokeMethod.Body.GetILProcessor();
-        invokeMethod.Body.InitLocals = true;
+        body.Variables.Add(new Local(importer.ImportAsTypeSig(typeof(Type)))); // 0: type
+        body.Variables.Add(new Local(importer.ImportAsTypeSig(typeof(System.Reflection.MethodInfo)))); // 1: mi
 
-        // ローカル: Type type, MethodInfo mi
-        invokeMethod.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(Type))));
-        invokeMethod.Body.Variables.Add(new VariableDefinition(
-            module.ImportReference(typeof(System.Reflection.MethodInfo))));
-
-        // var type = Type.GetType(typeName) ?? Assembly.GetExecutingAssembly().GetType(typeName);
-        var getType = module.ImportReference(
-            typeof(Type).GetMethod("GetType", [typeof(string)])!);
-        var getExecAsm = module.ImportReference(
+        var getType = importer.Import(typeof(Type).GetMethod("GetType", [typeof(string)])!);
+        var getExecAsm = importer.Import(
             typeof(System.Reflection.Assembly).GetMethod("GetExecutingAssembly")!);
-        var asmGetType = module.ImportReference(
+        var asmGetType = importer.Import(
             typeof(System.Reflection.Assembly).GetMethod("GetType", [typeof(string)])!);
-
-        il.Append(il.Create(OpCodes.Ldarg_0));
-        il.Append(il.Create(OpCodes.Call, getType));
-        il.Append(il.Create(OpCodes.Dup));
-
-        var afterTypeResolve = il.Create(OpCodes.Stloc_0);
-        il.Append(il.Create(OpCodes.Brtrue, afterTypeResolve));
-
-        // fallback: Assembly.GetExecutingAssembly().GetType(typeName)
-        il.Append(il.Create(OpCodes.Pop));
-        il.Append(il.Create(OpCodes.Call, getExecAsm));
-        il.Append(il.Create(OpCodes.Ldarg_0));
-        il.Append(il.Create(OpCodes.Callvirt, asmGetType));
-
-        il.Append(afterTypeResolve);
-
-        // var mi = type.GetMethod(methodName, bindingFlags, null, paramTypes, null);
-        var getMethodRef = module.ImportReference(
+        var getMethodRef = importer.Import(
             typeof(Type).GetMethod("GetMethod", [
-                typeof(string),
-                typeof(System.Reflection.BindingFlags),
-                typeof(System.Reflection.Binder),
-                typeof(Type[]),
+                typeof(string), typeof(System.Reflection.BindingFlags),
+                typeof(System.Reflection.Binder), typeof(Type[]),
                 typeof(System.Reflection.ParameterModifier[])
             ])!);
+        var invokeRef = importer.Import(
+            typeof(System.Reflection.MethodBase).GetMethod("Invoke", [typeof(object), typeof(object[])])!);
 
-        il.Append(il.Create(OpCodes.Ldloc_0));
-        il.Append(il.Create(OpCodes.Ldarg_1));
-        il.Append(il.Create(OpCodes.Ldc_I4, (int)(
+        // var type = Type.GetType(typeName)
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_0));
+        body.Instructions.Add(new Instruction(OpCodes.Call, getType));
+        body.Instructions.Add(new Instruction(OpCodes.Dup));
+
+        var afterTypeResolve = new Instruction(OpCodes.Stloc_0);
+        body.Instructions.Add(new Instruction(OpCodes.Brtrue, afterTypeResolve));
+
+        // fallback
+        body.Instructions.Add(new Instruction(OpCodes.Pop));
+        body.Instructions.Add(new Instruction(OpCodes.Call, getExecAsm));
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_0));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, asmGetType));
+
+        body.Instructions.Add(afterTypeResolve);
+
+        // mi = type.GetMethod(...)
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_0));
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_1));
+        body.Instructions.Add(Instruction.CreateLdcI4((int)(
             System.Reflection.BindingFlags.Public |
             System.Reflection.BindingFlags.NonPublic |
             System.Reflection.BindingFlags.Static |
             System.Reflection.BindingFlags.Instance)));
-        il.Append(il.Create(OpCodes.Ldnull)); // binder
-        il.Append(il.Create(OpCodes.Ldarg_2)); // paramTypes
-        il.Append(il.Create(OpCodes.Ldnull)); // modifiers
-        il.Append(il.Create(OpCodes.Callvirt, getMethodRef));
-        il.Append(il.Create(OpCodes.Stloc_1));
+        body.Instructions.Add(new Instruction(OpCodes.Ldnull));
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_2));
+        body.Instructions.Add(new Instruction(OpCodes.Ldnull));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, getMethodRef));
+        body.Instructions.Add(new Instruction(OpCodes.Stloc_1));
 
-        // return mi.Invoke(null, args);
-        var invokeRef = module.ImportReference(
-            typeof(System.Reflection.MethodBase).GetMethod("Invoke", [typeof(object), typeof(object[])])!);
-
-        il.Append(il.Create(OpCodes.Ldloc_1));
-        il.Append(il.Create(OpCodes.Ldnull)); // instance (static)
-        il.Append(il.Create(OpCodes.Ldarg_3)); // args
-        il.Append(il.Create(OpCodes.Callvirt, invokeRef));
-        il.Append(il.Create(OpCodes.Ret));
+        // return mi.Invoke(null, args)
+        body.Instructions.Add(new Instruction(OpCodes.Ldloc_1));
+        body.Instructions.Add(new Instruction(OpCodes.Ldnull));
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_3));
+        body.Instructions.Add(new Instruction(OpCodes.Callvirt, invokeRef));
+        body.Instructions.Add(new Instruction(OpCodes.Ret));
 
         helperType.Methods.Add(invokeMethod);
         module.Types.Add(helperType);

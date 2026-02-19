@@ -1,15 +1,15 @@
-using Mono.Cecil;
-using Mono.Cecil.Cil;
+using dnlib.DotNet;
+using dnlib.DotNet.Emit;
 using Netbfsctn.Core.Pipeline;
 using Netbfsctn.Core.Techniques;
 
 namespace Netbfsctn.IL.Techniques;
 
-public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDefinition>
+public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
 {
     public string Name => "制御フロー難読化 (IL)";
 
-    public void Apply(ModuleDefinition module, ObfuscationContext context, ObfuscationResult result)
+    public void Apply(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
     {
         foreach (var type in module.Types)
         {
@@ -20,7 +20,7 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDefinition>
             {
                 if (!method.HasBody) continue;
                 if (method.Body.Instructions.Count < 4) continue;
-                if (method.Body.HasExceptionHandlers) continue;
+                if (method.Body.ExceptionHandlers.Count > 0) continue;
 
                 TransformToStatesMachine(method, module, context);
                 result.ObfuscatedMethods++;
@@ -28,10 +28,9 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDefinition>
         }
     }
 
-    private void TransformToStatesMachine(MethodDefinition method, ModuleDefinition module, ObfuscationContext context)
+    private void TransformToStatesMachine(MethodDef method, ModuleDef module, ObfuscationContext context)
     {
         var body = method.Body;
-        var il = body.GetILProcessor();
 
         // 基本ブロックに分割
         var blocks = SplitIntoBasicBlocks(body);
@@ -41,7 +40,7 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDefinition>
         context.Logger.Verbose($"制御フロー変換: {method.Name} ({blocks.Count} ブロック)");
 
         // ステート変数を追加
-        var stateVar = new VariableDefinition(module.ImportReference(typeof(int)));
+        var stateVar = new Local(module.CorLibTypes.Int32);
         body.Variables.Add(stateVar);
         body.InitLocals = true;
         var stateIndex = body.Variables.Count - 1;
@@ -59,25 +58,25 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDefinition>
         var newInstructions = new List<Instruction>();
 
         // state = 0 (最初のブロックのインデックス)
-        newInstructions.Add(il.Create(OpCodes.Ldc_I4, 0));
-        newInstructions.Add(il.Create(OpCodes.Stloc, stateIndex));
+        newInstructions.Add(Instruction.CreateLdcI4(0));
+        newInstructions.Add(new Instruction(OpCodes.Stloc, body.Variables[stateIndex]));
 
         // ループ開始点
-        var loopStart = il.Create(OpCodes.Ldloc, stateIndex);
+        var loopStart = new Instruction(OpCodes.Ldloc, body.Variables[stateIndex]);
         newInstructions.Add(loopStart);
 
         // switch ディスパッチャー
         var blockLabels = new Instruction[blocks.Count];
         for (var i = 0; i < blocks.Count; i++)
         {
-            blockLabels[i] = il.Create(OpCodes.Nop);
+            blockLabels[i] = new Instruction(OpCodes.Nop);
         }
 
-        newInstructions.Add(il.Create(OpCodes.Switch, blockLabels));
+        newInstructions.Add(new Instruction(OpCodes.Switch, blockLabels));
 
         // ret (デフォルト - 到達しないはず)
-        var exitLabel = il.Create(OpCodes.Ret);
-        newInstructions.Add(il.Create(OpCodes.Br, exitLabel));
+        var exitLabel = new Instruction(OpCodes.Ret);
+        newInstructions.Add(new Instruction(OpCodes.Br, exitLabel));
 
         // 各ブロックをシャッフルされた順序で配置
         for (var shuffledIdx = 0; shuffledIdx < blocks.Count; shuffledIdx++)
@@ -87,27 +86,10 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDefinition>
 
             newInstructions.Add(blockLabels[originalIdx]);
 
-            // ブロックの命令をコピー（最後の命令は特別処理）
+            // ブロックの命令をコピー
             for (var i = 0; i < block.Count; i++)
             {
                 var instr = block[i];
-
-                // ブロック最後が ret の場合はそのまま
-                if (i == block.Count - 1 && instr.OpCode == OpCodes.Ret)
-                {
-                    if (originalIdx == blocks.Count - 1)
-                    {
-                        // 最終ブロックの ret はそのまま
-                        newInstructions.Add(instr);
-                    }
-                    else
-                    {
-                        // 途中の ret もそのまま
-                        newInstructions.Add(instr);
-                    }
-                    continue;
-                }
-
                 newInstructions.Add(instr);
             }
 
@@ -118,9 +100,9 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDefinition>
                 var nextState = originalIdx + 1;
                 if (nextState < blocks.Count)
                 {
-                    newInstructions.Add(il.Create(OpCodes.Ldc_I4, nextState));
-                    newInstructions.Add(il.Create(OpCodes.Stloc, stateIndex));
-                    newInstructions.Add(il.Create(OpCodes.Br, loopStart));
+                    newInstructions.Add(Instruction.CreateLdcI4(nextState));
+                    newInstructions.Add(new Instruction(OpCodes.Stloc, body.Variables[stateIndex]));
+                    newInstructions.Add(new Instruction(OpCodes.Br, loopStart));
                 }
             }
         }
@@ -135,7 +117,7 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDefinition>
         }
     }
 
-    private static List<List<Instruction>> SplitIntoBasicBlocks(MethodBody body)
+    private static List<List<Instruction>> SplitIntoBasicBlocks(CilBody body)
     {
         var blocks = new List<List<Instruction>>();
         var currentBlock = new List<Instruction>();
