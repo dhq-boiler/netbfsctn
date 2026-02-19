@@ -1,0 +1,20 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" Version="2.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Netbfsctn.Core\Netbfsctn.Core.csproj" />
+    <ProjectReference Include="..\Netbfsctn.IL\Netbfsctn.IL.csproj" />
+    <ProjectReference Include="..\Netbfsctn.Source\Netbfsctn.Source.csproj" />
+  </ItemGroup>
+
+</Project>

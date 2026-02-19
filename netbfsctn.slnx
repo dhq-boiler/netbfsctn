@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Netbfsctn.Cli/Netbfsctn.Cli.csproj" />
+    <Project Path="src/Netbfsctn.Core/Netbfsctn.Core.csproj" />
+    <Project Path="src/Netbfsctn.IL/Netbfsctn.IL.csproj" />
+    <Project Path="src/Netbfsctn.Source/Netbfsctn.Source.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Netbfsctn.Tests/Netbfsctn.Tests.csproj" />
+  </Folder>
+</Solution>
