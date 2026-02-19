@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Mono.Cecil;
 using Netbfsctn.Core.Pipeline;
 using Netbfsctn.Core.Techniques;
@@ -26,6 +27,7 @@ public class ILObfuscationPipeline : IObfuscationPipeline
 
             var techniques = new List<IObfuscationTechnique<ModuleDefinition>>();
 
+            // 既存テクニック
             if (options.EnableRename)
                 techniques.Add(new ILNameObfuscator());
             if (options.EnableStringEncryption)
@@ -34,6 +36,22 @@ public class ILObfuscationPipeline : IObfuscationPipeline
                 techniques.Add(new ILControlFlowObfuscator());
             if (options.EnableDeadCode)
                 techniques.Add(new ILDeadCodeInserter());
+
+            // 追加テクニック (適用順序に従って登録)
+            if (options.EnableAntiIldasm)
+                techniques.Add(new ILAntiIldasm());
+            if (options.EnableAntiDebug)
+                techniques.Add(new ILAntiDebug());
+            if (options.EnableHideMethodCalls)
+                techniques.Add(new ILHideMethodCalls());
+            if (options.EnableResourceProtection)
+                techniques.Add(new ILResourceProtector());
+            if (options.EnableNecroBit)
+                techniques.Add(new ILNecroBit());
+            if (options.EnableCodeVirtualization)
+                techniques.Add(new ILCodeVirtualizer());
+            if (options.EnableAntiTampering)
+                techniques.Add(new ILAntiTampering());
 
             foreach (var technique in techniques)
             {
@@ -47,6 +65,21 @@ public class ILObfuscationPipeline : IObfuscationPipeline
 
             logger.Info($"保存中: {outputPath}");
             assembly.Write(outputPath);
+
+            // マッピングファイルのポスト処理
+            if (options.EnableMappingFile || options.EnableRename)
+            {
+                if (options.EnableMappingFile)
+                {
+                    var mappingPath = options.MappingFilePath
+                        ?? $"{outputPath}.map.json";
+                    var json = JsonSerializer.Serialize(context.NameMap,
+                        new JsonSerializerOptions { WriteIndented = true });
+                    File.WriteAllText(mappingPath, json);
+                    result.MappingFilePath = mappingPath;
+                    logger.Info($"マッピングファイル出力: {mappingPath}");
+                }
+            }
 
             return result;
         }

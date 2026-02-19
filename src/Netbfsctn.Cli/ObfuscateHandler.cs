@@ -43,6 +43,22 @@ public static class ObfuscateHandler
             logger.Info($"  文字列暗号化: {result.EncryptedStrings} 文字列");
             logger.Info($"  制御フロー難読化: {result.ObfuscatedMethods} メソッド");
             logger.Info($"  デッドコード挿入: {result.InsertedDeadCodeBlocks} ブロック");
+            if (result.AntiIldasmApplied)
+                logger.Info("  Anti-ILDASM: 適用済み");
+            if (result.AntiDebugApplied)
+                logger.Info("  Anti-Debug: 適用済み");
+            if (result.AntiTamperingApplied)
+                logger.Info("  Anti-Tampering: 適用済み");
+            if (result.EncryptedMethodBodies > 0)
+                logger.Info($"  NecroBit: {result.EncryptedMethodBodies} メソッド暗号化");
+            if (result.HiddenMethodCalls > 0)
+                logger.Info($"  呼び出し隠蔽: {result.HiddenMethodCalls} 呼び出し");
+            if (result.MappingFilePath != null)
+                logger.Info($"  マッピングファイル: {result.MappingFilePath}");
+            if (result.ProtectedResources > 0)
+                logger.Info($"  リソース保護: {result.ProtectedResources} リソース");
+            if (result.VirtualizedMethods > 0)
+                logger.Info($"  仮想化: {result.VirtualizedMethods} メソッド");
             return 0;
         }
 

@@ -25,6 +25,17 @@ public class ObfuscationOptions
     public bool Verbose { get; init; }
     public bool Quiet { get; init; }
 
+    // 追加難読化テクニック (オプトイン)
+    public bool EnableAntiIldasm { get; init; }
+    public bool EnableAntiDebug { get; init; }
+    public bool EnableAntiTampering { get; init; }
+    public bool EnableNecroBit { get; init; }
+    public bool EnableHideMethodCalls { get; init; }
+    public bool EnableMappingFile { get; init; }
+    public string? MappingFilePath { get; init; }
+    public bool EnableResourceProtection { get; init; }
+    public bool EnableCodeVirtualization { get; init; }
+
     public ObfuscationMode ResolvedMode =>
         Mode ?? InferMode(InputPath);
 

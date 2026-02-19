@@ -53,6 +53,46 @@ var quietOption = new Option<bool>("--quiet", "-q")
     Description = "最小限の出力"
 };
 
+var antiIldasmOption = new Option<bool>("--anti-ildasm")
+{
+    Description = "Anti-ILDASM 属性を付与"
+};
+
+var antiDebugOption = new Option<bool>("--anti-debug")
+{
+    Description = "デバッガ検出コードを注入"
+};
+
+var antiTamperOption = new Option<bool>("--anti-tamper")
+{
+    Description = "改ざん検出コードを注入"
+};
+
+var necroBitOption = new Option<bool>("--necrobit")
+{
+    Description = "メソッドボディを暗号化"
+};
+
+var hideCallsOption = new Option<bool>("--hide-calls")
+{
+    Description = "メソッド呼び出しをリフレクション経由に置換"
+};
+
+var mappingFileOption = new Option<string?>("--mapping-file")
+{
+    Description = "名前マッピングファイルを出力 (パス指定可)"
+};
+
+var protectResourcesOption = new Option<bool>("--protect-resources")
+{
+    Description = "埋め込みリソースを暗号化"
+};
+
+var virtualizeOption = new Option<bool>("--virtualize")
+{
+    Description = "メソッドをカスタム VM バイトコードに変換"
+};
+
 var rootCommand = new RootCommand("netbfsctn - .NET 難読化 CLI ツール");
 rootCommand.Arguments.Add(inputArgument);
 rootCommand.Options.Add(outputOption);
@@ -64,6 +104,14 @@ rootCommand.Options.Add(noDeadCodeOption);
 rootCommand.Options.Add(encryptionOption);
 rootCommand.Options.Add(verboseOption);
 rootCommand.Options.Add(quietOption);
+rootCommand.Options.Add(antiIldasmOption);
+rootCommand.Options.Add(antiDebugOption);
+rootCommand.Options.Add(antiTamperOption);
+rootCommand.Options.Add(necroBitOption);
+rootCommand.Options.Add(hideCallsOption);
+rootCommand.Options.Add(mappingFileOption);
+rootCommand.Options.Add(protectResourcesOption);
+rootCommand.Options.Add(virtualizeOption);
 
 rootCommand.SetAction(parseResult =>
 {
@@ -77,6 +125,14 @@ rootCommand.SetAction(parseResult =>
     var encryption = parseResult.GetValue(encryptionOption);
     var verbose = parseResult.GetValue(verboseOption);
     var quiet = parseResult.GetValue(quietOption);
+    var antiIldasm = parseResult.GetValue(antiIldasmOption);
+    var antiDebug = parseResult.GetValue(antiDebugOption);
+    var antiTamper = parseResult.GetValue(antiTamperOption);
+    var necroBit = parseResult.GetValue(necroBitOption);
+    var hideCalls = parseResult.GetValue(hideCallsOption);
+    var mappingFile = parseResult.GetValue(mappingFileOption);
+    var protectResources = parseResult.GetValue(protectResourcesOption);
+    var virtualize = parseResult.GetValue(virtualizeOption);
 
     var options = new ObfuscationOptions
     {
@@ -96,7 +152,16 @@ rootCommand.SetAction(parseResult =>
             ? EncryptionMethod.Aes
             : EncryptionMethod.Xor,
         Verbose = verbose,
-        Quiet = quiet
+        Quiet = quiet,
+        EnableAntiIldasm = antiIldasm,
+        EnableAntiDebug = antiDebug,
+        EnableAntiTampering = antiTamper,
+        EnableNecroBit = necroBit,
+        EnableHideMethodCalls = hideCalls,
+        EnableMappingFile = mappingFile != null,
+        MappingFilePath = mappingFile,
+        EnableResourceProtection = protectResources,
+        EnableCodeVirtualization = virtualize
     };
 
     return ObfuscateHandler.Execute(options);

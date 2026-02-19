@@ -9,4 +9,14 @@ public class ObfuscationResult
     public int EncryptedStrings { get; set; }
     public int ObfuscatedMethods { get; set; }
     public int InsertedDeadCodeBlocks { get; set; }
+
+    // 追加テクニック結果
+    public bool AntiIldasmApplied { get; set; }
+    public bool AntiDebugApplied { get; set; }
+    public bool AntiTamperingApplied { get; set; }
+    public int EncryptedMethodBodies { get; set; }
+    public int HiddenMethodCalls { get; set; }
+    public string? MappingFilePath { get; set; }
+    public int ProtectedResources { get; set; }
+    public int VirtualizedMethods { get; set; }
 }
