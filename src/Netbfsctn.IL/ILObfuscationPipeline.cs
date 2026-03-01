@@ -66,6 +66,52 @@ public class ILObfuscationPipeline : IObfuscationPipeline
             if (!string.IsNullOrEmpty(dir))
                 Directory.CreateDirectory(dir);
 
+            // 難読化後のメソッドでブランチ最適化と検証
+            foreach (var type in module.GetTypes())
+            {
+                foreach (var method in type.Methods)
+                {
+                    if (!method.HasBody) continue;
+                    var body = method.Body;
+
+                    // 不正な分岐ターゲットを検出
+                    var instrSet = new HashSet<dnlib.DotNet.Emit.Instruction>(body.Instructions);
+                    var hasInvalid = false;
+                    foreach (var instr in body.Instructions)
+                    {
+                        if (instr.Operand is dnlib.DotNet.Emit.Instruction target && !instrSet.Contains(target))
+                        {
+                            hasInvalid = true;
+                            break;
+                        }
+                        if (instr.Operand is dnlib.DotNet.Emit.Instruction[] targets)
+                        {
+                            foreach (var t in targets)
+                            {
+                                if (!instrSet.Contains(t))
+                                {
+                                    hasInvalid = true;
+                                    break;
+                                }
+                            }
+                            if (hasInvalid) break;
+                        }
+                    }
+
+                    if (hasInvalid)
+                    {
+                        // 不正な参照がある場合は元の maxStack を保持して書き出し
+                        body.KeepOldMaxStack = true;
+                        logger.Verbose($"不正な分岐参照を検出: {method.FullName} - KeepOldMaxStack で保存");
+                        continue;
+                    }
+
+                    // maxStack を再計算させる（KeepOldMaxStack = false がデフォルト）
+                    body.SimplifyBranches();
+                    body.OptimizeBranches();
+                }
+            }
+
             logger.Info($"保存中: {outputPath}");
             if (isMixedMode)
             {
