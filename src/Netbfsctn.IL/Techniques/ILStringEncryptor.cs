@@ -64,9 +64,10 @@ public class ILStringEncryptor : IObfuscationTechnique<ModuleDef>
             newInstructions.AddRange(CreateByteArrayLoadInstructions(key, module));
             newInstructions.Add(new Instruction(OpCodes.Call, decryptMethod));
 
-            // 元の ldstr を最初の命令に置き換え
+            // 元の ldstr をインプレースで書き換え（分岐ターゲット参照を保持）
             var idx = body.Instructions.IndexOf(instr);
-            body.Instructions[idx] = newInstructions[0];
+            instr.OpCode = newInstructions[0].OpCode;
+            instr.Operand = newInstructions[0].Operand;
 
             // 残りの命令を後続に挿入
             for (var i = 1; i < newInstructions.Count; i++)
