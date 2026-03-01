@@ -72,6 +72,10 @@ public class ILDeadCodeInserter : IObfuscationTechnique<ModuleDef>
                 continue;
             if (type.IsInterface)
                 continue;
+            if (type.IsEnum)
+                continue;
+            if (type.IsValueType)
+                continue;
 
             var dummyCount = random.Next(1, 3);
             for (var i = 0; i < dummyCount; i++)

@@ -21,9 +21,18 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
                 if (!method.HasBody) continue;
                 if (method.Body.Instructions.Count < 4) continue;
                 if (method.Body.ExceptionHandlers.Count > 0) continue;
+                // switch 命令を含むメソッドはスキップ（ステートマシン変換と衝突する）
+                if (method.Body.Instructions.Any(i => i.OpCode == OpCodes.Switch)) continue;
 
-                TransformToStatesMachine(method, module, context);
-                result.ObfuscatedMethods++;
+                try
+                {
+                    TransformToStatesMachine(method, module, context);
+                    result.ObfuscatedMethods++;
+                }
+                catch (Exception ex)
+                {
+                    context.Logger.Verbose($"制御フロー変換をスキップ: {method.FullName} ({ex.Message})");
+                }
             }
         }
     }
