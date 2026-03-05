@@ -36,6 +36,10 @@ public class ObfuscationOptions
     public bool EnableResourceProtection { get; init; }
     public bool EnableCodeVirtualization { get; init; }
 
+    // 複数アセンブリ同時難読化
+    public string[] AdditionalInputPaths { get; init; } = [];
+    public string[] AdditionalOutputPaths { get; init; } = [];
+
     public ObfuscationMode ResolvedMode =>
         Mode ?? InferMode(InputPath);
 

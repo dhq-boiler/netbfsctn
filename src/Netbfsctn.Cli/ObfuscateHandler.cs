@@ -17,6 +17,23 @@ public static class ObfuscateHandler
             return 1;
         }
 
+        // 追加入力パスのバリデーション
+        foreach (var additionalInput in options.AdditionalInputPaths)
+        {
+            if (!File.Exists(additionalInput))
+            {
+                logger.Error($"追加入力パスが見つかりません: {additionalInput}");
+                return 1;
+            }
+        }
+
+        // 追加出力パス数が追加入力パス数を超えていないかチェック
+        if (options.AdditionalOutputPaths.Length > options.AdditionalInputPaths.Length)
+        {
+            logger.Error("追加出力パスの数が追加入力パスの数を超えています");
+            return 1;
+        }
+
         var context = new ObfuscationContext
         {
             Options = options,

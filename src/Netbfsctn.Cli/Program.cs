@@ -93,6 +93,18 @@ var virtualizeOption = new Option<bool>("--virtualize")
     Description = "メソッドをカスタム VM バイトコードに変換"
 };
 
+var additionalInputOption = new Option<string[]>("--additional-input")
+{
+    Description = "追加の入力アセンブリパス (複数指定可)",
+    AllowMultipleArgumentsPerToken = true
+};
+
+var additionalOutputOption = new Option<string[]>("--additional-output")
+{
+    Description = "追加の出力アセンブリパス (複数指定可)",
+    AllowMultipleArgumentsPerToken = true
+};
+
 var rootCommand = new RootCommand("netbfsctn - .NET 難読化 CLI ツール");
 rootCommand.Arguments.Add(inputArgument);
 rootCommand.Options.Add(outputOption);
@@ -112,6 +124,8 @@ rootCommand.Options.Add(hideCallsOption);
 rootCommand.Options.Add(mappingFileOption);
 rootCommand.Options.Add(protectResourcesOption);
 rootCommand.Options.Add(virtualizeOption);
+rootCommand.Options.Add(additionalInputOption);
+rootCommand.Options.Add(additionalOutputOption);
 
 rootCommand.SetAction(parseResult =>
 {
@@ -133,6 +147,8 @@ rootCommand.SetAction(parseResult =>
     var mappingFile = parseResult.GetValue(mappingFileOption);
     var protectResources = parseResult.GetValue(protectResourcesOption);
     var virtualize = parseResult.GetValue(virtualizeOption);
+    var additionalInputs = parseResult.GetValue(additionalInputOption) ?? [];
+    var additionalOutputs = parseResult.GetValue(additionalOutputOption) ?? [];
 
     var options = new ObfuscationOptions
     {
@@ -161,7 +177,9 @@ rootCommand.SetAction(parseResult =>
         EnableMappingFile = mappingFile != null,
         MappingFilePath = mappingFile,
         EnableResourceProtection = protectResources,
-        EnableCodeVirtualization = virtualize
+        EnableCodeVirtualization = virtualize,
+        AdditionalInputPaths = additionalInputs,
+        AdditionalOutputPaths = additionalOutputs
     };
 
     return ObfuscateHandler.Execute(options);
