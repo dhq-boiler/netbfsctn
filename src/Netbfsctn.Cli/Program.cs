@@ -22,6 +22,26 @@ var noRenameOption = new Option<bool>("--no-rename")
     Description = "名前難読化を無効化"
 };
 
+var renameTypesOption = new Option<bool>("--rename-types")
+{
+    Description = "型名のみ難読化 (--no-rename と併用で個別有効化)"
+};
+
+var renameFieldsOption = new Option<bool>("--rename-fields")
+{
+    Description = "フィールド名のみ難読化 (--no-rename と併用で個別有効化)"
+};
+
+var renameMethodsOption = new Option<bool>("--rename-methods")
+{
+    Description = "メソッド名のみ難読化 (--no-rename と併用で個別有効化)"
+};
+
+var renamePropertiesOption = new Option<bool>("--rename-properties")
+{
+    Description = "プロパティ名のみ難読化 (--no-rename と併用で個別有効化)"
+};
+
 var noStringsOption = new Option<bool>("--no-strings")
 {
     Description = "文字列暗号化を無効化"
@@ -110,6 +130,10 @@ rootCommand.Arguments.Add(inputArgument);
 rootCommand.Options.Add(outputOption);
 rootCommand.Options.Add(modeOption);
 rootCommand.Options.Add(noRenameOption);
+rootCommand.Options.Add(renameTypesOption);
+rootCommand.Options.Add(renameFieldsOption);
+rootCommand.Options.Add(renameMethodsOption);
+rootCommand.Options.Add(renamePropertiesOption);
 rootCommand.Options.Add(noStringsOption);
 rootCommand.Options.Add(noControlFlowOption);
 rootCommand.Options.Add(noDeadCodeOption);
@@ -133,6 +157,10 @@ rootCommand.SetAction(parseResult =>
     var output = parseResult.GetValue(outputOption);
     var mode = parseResult.GetValue(modeOption);
     var noRename = parseResult.GetValue(noRenameOption);
+    var renameTypes = parseResult.GetValue(renameTypesOption);
+    var renameFields = parseResult.GetValue(renameFieldsOption);
+    var renameMethods = parseResult.GetValue(renameMethodsOption);
+    var renameProperties = parseResult.GetValue(renamePropertiesOption);
     var noStrings = parseResult.GetValue(noStringsOption);
     var noControlFlow = parseResult.GetValue(noControlFlowOption);
     var noDeadCode = parseResult.GetValue(noDeadCodeOption);
@@ -160,7 +188,11 @@ rootCommand.SetAction(parseResult =>
             "source" => ObfuscationMode.Source,
             _ => null
         },
-        EnableRename = !noRename,
+        EnableRename = !noRename || renameTypes || renameFields || renameMethods || renameProperties,
+        EnableRenameTypes = noRename ? renameTypes : true,
+        EnableRenameFields = noRename ? renameFields : true,
+        EnableRenameMethods = noRename ? renameMethods : true,
+        EnableRenameProperties = noRename ? renameProperties : true,
         EnableStringEncryption = !noStrings,
         EnableControlFlow = !noControlFlow,
         EnableDeadCode = !noDeadCode,

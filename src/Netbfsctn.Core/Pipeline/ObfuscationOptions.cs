@@ -18,6 +18,10 @@ public class ObfuscationOptions
     public string? OutputPath { get; init; }
     public ObfuscationMode? Mode { get; init; }
     public bool EnableRename { get; init; } = true;
+    public bool EnableRenameTypes { get; init; } = true;
+    public bool EnableRenameFields { get; init; } = true;
+    public bool EnableRenameMethods { get; init; } = true;
+    public bool EnableRenameProperties { get; init; } = true;
     public bool EnableStringEncryption { get; init; } = true;
     public bool EnableControlFlow { get; init; } = true;
     public bool EnableDeadCode { get; init; } = true;

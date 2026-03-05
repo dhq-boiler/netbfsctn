@@ -21,6 +21,8 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
 
     private void ProcessType(TypeDef type, ObfuscationContext context, ObfuscationResult result)
     {
+        var options = context.Options;
+
         // ネストされた型を先に処理
         foreach (var nested in type.NestedTypes)
         {
@@ -31,50 +33,66 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         if (type.IsPublic || type.IsNestedPublic)
             return;
 
-        // フィールドの名前変更
-        foreach (var field in type.Fields)
-        {
-            if (field.IsPublic)
-                continue;
+        // コンパイラ生成型はスキップ（匿名型、クロージャ、ステートマシン等）
+        if (IsCompilerGenerated(type))
+            return;
 
-            var newName = context.NameGenerator.Next();
-            context.NameMap[field.FullName] = newName;
-            context.Logger.Verbose($"フィールド: {field.Name} -> {newName}");
-            field.Name = newName;
-            result.RenamedSymbols++;
+        // フィールドの名前変更
+        if (options.EnableRenameFields)
+        {
+            foreach (var field in type.Fields)
+            {
+                if (field.IsPublic)
+                    continue;
+
+                var newName = context.NameGenerator.Next();
+                context.NameMap[field.FullName] = newName;
+                context.Logger.Verbose($"フィールド: {field.Name} -> {newName}");
+                field.Name = newName;
+                result.RenamedSymbols++;
+            }
         }
 
         // メソッドの名前変更
-        foreach (var method in type.Methods)
+        if (options.EnableRenameMethods)
         {
-            if (ShouldSkipMethod(method))
-                continue;
+            foreach (var method in type.Methods)
+            {
+                if (ShouldSkipMethod(method))
+                    continue;
 
-            var newName = context.NameGenerator.Next();
-            context.NameMap[method.FullName] = newName;
-            context.Logger.Verbose($"メソッド: {method.Name} -> {newName}");
-            method.Name = newName;
-            result.RenamedSymbols++;
+                var newName = context.NameGenerator.Next();
+                context.NameMap[method.FullName] = newName;
+                context.Logger.Verbose($"メソッド: {method.Name} -> {newName}");
+                method.Name = newName;
+                result.RenamedSymbols++;
+            }
         }
 
         // プロパティの名前変更
-        foreach (var property in type.Properties)
+        if (options.EnableRenameProperties)
         {
-            if (property.GetMethod?.IsPublic == true || property.SetMethod?.IsPublic == true)
-                continue;
+            foreach (var property in type.Properties)
+            {
+                if (property.GetMethod?.IsPublic == true || property.SetMethod?.IsPublic == true)
+                    continue;
 
-            var newName = context.NameGenerator.Next();
-            context.Logger.Verbose($"プロパティ: {property.Name} -> {newName}");
-            property.Name = newName;
-            result.RenamedSymbols++;
+                var newName = context.NameGenerator.Next();
+                context.Logger.Verbose($"プロパティ: {property.Name} -> {newName}");
+                property.Name = newName;
+                result.RenamedSymbols++;
+            }
         }
 
         // 型自体の名前変更
-        var newTypeName = context.NameGenerator.Next();
-        context.NameMap[type.FullName] = newTypeName;
-        context.Logger.Verbose($"型: {type.Name} -> {newTypeName}");
-        type.Name = newTypeName;
-        result.RenamedSymbols++;
+        if (options.EnableRenameTypes)
+        {
+            var newTypeName = context.NameGenerator.Next();
+            context.NameMap[type.FullName] = newTypeName;
+            context.Logger.Verbose($"型: {type.Name} -> {newTypeName}");
+            type.Name = newTypeName;
+            result.RenamedSymbols++;
+        }
     }
 
     private static bool ShouldSkipMethod(MethodDef method)
@@ -85,6 +103,27 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         if (method.IsVirtual) return true;
         if (method.HasOverrides) return true;
         if (method.IsSpecialName) return true;
+        return false;
+    }
+
+    private static bool IsCompilerGenerated(TypeDef type)
+    {
+        var name = type.Name.String;
+        // 匿名型: <>f__AnonymousType
+        if (name.StartsWith("<>f__AnonymousType"))
+            return true;
+        // クロージャ: <>c__DisplayClass
+        if (name.StartsWith("<>c__DisplayClass") || name == "<>c")
+            return true;
+        // async ステートマシン: <MethodName>d__
+        if (name.Contains(">d__"))
+            return true;
+        // イテレータ ステートマシン
+        if (name.Contains(">e__"))
+            return true;
+        // CompilerGeneratedAttribute
+        if (type.CustomAttributes.Any(a => a.TypeFullName == "System.Runtime.CompilerServices.CompilerGeneratedAttribute"))
+            return true;
         return false;
     }
 }
