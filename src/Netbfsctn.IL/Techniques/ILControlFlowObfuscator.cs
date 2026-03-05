@@ -11,7 +11,7 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
 
     public void Apply(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
     {
-        foreach (var type in module.Types)
+        foreach (var type in module.GetTypes())
         {
             if (type.Name == "<Module>")
                 continue;
@@ -45,6 +45,16 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
         var blocks = SplitIntoBasicBlocks(body);
         if (blocks.Count < 2)
             return;
+
+        // スタックデルタが0でないブロックがあればスキップ（変換すると壊れる）
+        foreach (var block in blocks)
+        {
+            if (CalculateBlockStackDelta(block) != 0)
+            {
+                context.Logger.Verbose($"制御フロー変換をスキップ (スタック非中立ブロック): {method.FullName}");
+                return;
+            }
+        }
 
         context.Logger.Verbose($"制御フロー変換: {method.Name} ({blocks.Count} ブロック)");
 
@@ -168,5 +178,83 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
             blocks.Add(currentBlock);
 
         return blocks;
+    }
+
+    private static int CalculateBlockStackDelta(List<Instruction> block)
+    {
+        var delta = 0;
+        foreach (var instr in block)
+        {
+            delta -= EstimateStackPop(instr);
+            delta += EstimateStackPush(instr);
+        }
+        return delta;
+    }
+
+    private static int EstimateStackPop(Instruction instr)
+    {
+        var opCode = instr.OpCode;
+
+        // call/callvirt/newobj は引数の数に依存
+        if (opCode.Code is Code.Call or Code.Callvirt or Code.Newobj)
+        {
+            if (instr.Operand is IMethodDefOrRef methodRef)
+            {
+                var sig = methodRef.MethodSig;
+                if (sig == null) return 0;
+                var count = sig.Params.Count;
+                // インスタンスメソッドは this を消費
+                if (sig.HasThis && opCode.Code != Code.Newobj)
+                    count++;
+                return count;
+            }
+            return 0;
+        }
+
+        return opCode.StackBehaviourPop switch
+        {
+            StackBehaviour.Pop0 => 0,
+            StackBehaviour.Pop1 or StackBehaviour.Popi or StackBehaviour.Popref => 1,
+            StackBehaviour.Pop1_pop1 or StackBehaviour.Popi_pop1
+                or StackBehaviour.Popi_popi or StackBehaviour.Popi_popi8
+                or StackBehaviour.Popi_popr4 or StackBehaviour.Popi_popr8
+                or StackBehaviour.Popref_pop1 or StackBehaviour.Popref_popi => 2,
+            StackBehaviour.Popi_popi_popi or StackBehaviour.Popref_popi_popi
+                or StackBehaviour.Popref_popi_popi8 or StackBehaviour.Popref_popi_popr4
+                or StackBehaviour.Popref_popi_popr8 or StackBehaviour.Popref_popi_popref
+                or StackBehaviour.Popref_popi_pop1 => 3,
+            _ => 0
+        };
+    }
+
+    private static int EstimateStackPush(Instruction instr)
+    {
+        var opCode = instr.OpCode;
+
+        // call/callvirt: 戻り値があれば1プッシュ
+        if (opCode.Code is Code.Call or Code.Callvirt)
+        {
+            if (instr.Operand is IMethodDefOrRef methodRef)
+            {
+                var sig = methodRef.MethodSig;
+                if (sig == null) return 0;
+                return sig.RetType != null && sig.RetType.ElementType != ElementType.Void ? 1 : 0;
+            }
+            return 0;
+        }
+
+        // newobj は常に1プッシュ
+        if (opCode.Code == Code.Newobj)
+            return 1;
+
+        return opCode.StackBehaviourPush switch
+        {
+            StackBehaviour.Push0 => 0,
+            StackBehaviour.Push1 or StackBehaviour.Pushi or StackBehaviour.Pushi8
+                or StackBehaviour.Pushr4 or StackBehaviour.Pushr8
+                or StackBehaviour.Pushref => 1,
+            StackBehaviour.Push1_push1 => 2,
+            _ => 0
+        };
     }
 }
