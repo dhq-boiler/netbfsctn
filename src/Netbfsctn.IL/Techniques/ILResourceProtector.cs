@@ -26,6 +26,12 @@ public class ILResourceProtector : IObfuscationTechnique<ModuleDef>
             if (resource.Name.String.StartsWith(EncPrefix))
                 continue;
 
+            if (ShouldSkipResource(resource.Name.String))
+            {
+                context.Logger.Verbose($"リソース保護スキップ (WPF/BAML): {resource.Name}");
+                continue;
+            }
+
             var data = resource.CreateReader().ToArray();
 
             var compressed = GZipCompress(data);
@@ -50,6 +56,13 @@ public class ILResourceProtector : IObfuscationTechnique<ModuleDef>
             prefixField.Constant = module.UpdateRowId(new ConstantUser(EncPrefix));
             helperType.Fields.Add(prefixField);
         }
+    }
+
+    private static bool ShouldSkipResource(string name)
+    {
+        return name.EndsWith(".g.resources", StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith(".baml", StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith(".resources", StringComparison.OrdinalIgnoreCase);
     }
 
     private static byte[] GZipCompress(byte[] data)
