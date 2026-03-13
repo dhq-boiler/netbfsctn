@@ -7,5 +7,7 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Netbfsctn.Tests/Netbfsctn.Tests.csproj" />
+    <Project Path="tests/Netbfsctn.Benchmark.SampleApp/Netbfsctn.Benchmark.SampleApp.csproj" />
+    <Project Path="tests/Netbfsctn.Benchmark/Netbfsctn.Benchmark.csproj" />
   </Folder>
 </Solution>
