@@ -46,15 +46,10 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
         if (blocks.Count < 2)
             return;
 
-        // スタックデルタが0でないブロックがあればスキップ（変換すると壊れる）
-        foreach (var block in blocks)
-        {
-            if (CalculateBlockStackDelta(block) != 0)
-            {
-                context.Logger.Verbose($"制御フロー変換をスキップ (スタック非中立ブロック): {method.FullName}");
-                return;
-            }
-        }
+        // スタック非中立なブロックを隣接ブロックと結合してスタック中立にする
+        blocks = MergeToStackNeutralBlocks(blocks);
+        if (blocks.Count < 2)
+            return;
 
         context.Logger.Verbose($"制御フロー変換: {method.Name} ({blocks.Count} ブロック)");
 
@@ -134,6 +129,46 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
         {
             body.Instructions.Add(instr);
         }
+    }
+
+    private static List<List<Instruction>> MergeToStackNeutralBlocks(List<List<Instruction>> blocks)
+    {
+        var merged = new List<List<Instruction>>();
+        var current = new List<Instruction>(blocks[0]);
+
+        for (var i = 1; i < blocks.Count; i++)
+        {
+            if (CalculateBlockStackDelta(current) == 0)
+            {
+                // 現在のブロックはスタック中立なので確定
+                merged.Add(current);
+                current = new List<Instruction>(blocks[i]);
+            }
+            else
+            {
+                // スタック非中立なので次のブロックと結合
+                current.AddRange(blocks[i]);
+            }
+        }
+
+        // 最後のブロック
+        if (current.Count > 0)
+        {
+            if (CalculateBlockStackDelta(current) != 0)
+            {
+                // 最後のブロックが非中立なら前のブロックと結合
+                if (merged.Count > 0)
+                    merged[^1].AddRange(current);
+                else
+                    merged.Add(current);
+            }
+            else
+            {
+                merged.Add(current);
+            }
+        }
+
+        return merged;
     }
 
     private static List<List<Instruction>> SplitIntoBasicBlocks(CilBody body)
