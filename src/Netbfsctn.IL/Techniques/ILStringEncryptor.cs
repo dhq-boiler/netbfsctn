@@ -24,7 +24,7 @@ public class ILStringEncryptor : IObfuscationTechnique<ModuleDef>
 
         foreach (var type in module.GetTypes())
         {
-            if (type == helperType || type.Name == "<Module>")
+            if (type == helperType)
                 continue;
 
             // 他のヘルパー型（ゼロ幅文字名）をスキップ

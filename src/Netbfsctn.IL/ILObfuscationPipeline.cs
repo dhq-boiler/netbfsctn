@@ -190,8 +190,11 @@ public class ILObfuscationPipeline : IObfuscationPipeline
         if (options.EnableCodeVirtualization)
             techniques.Add(new ILCodeVirtualizer());
 
-        // 2回目の文字列暗号化: HideCallsが注入した型名/メソッド名のldstrを暗号化
-        if (options.EnableStringEncryption && options.EnableHideMethodCalls)
+        // 2回目の文字列暗号化: 後段の技法が注入した新規ldstrを暗号化
+        var needsSecondStringPass = options.EnableStringEncryption
+            && (options.EnableHideMethodCalls || options.EnableNecroBit
+                || options.EnableAntiDebug);
+        if (needsSecondStringPass)
             techniques.Add(new ILStringEncryptor());
 
         if (options.EnableAntiTampering)
