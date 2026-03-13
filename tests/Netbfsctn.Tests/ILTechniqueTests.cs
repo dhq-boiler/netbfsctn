@@ -121,7 +121,7 @@ public class ILTechniqueTests : IDisposable
         using var module = LoadSampleModule();
         var (context, result) = CreateContext();
         new ILAntiTampering().Apply(module, context, result);
-        Assert.Contains(module.Resources, r => r.Name == "__tamper_hash__");
+        Assert.Contains(module.Resources, r => r.Name == "\u200B\u200D\u200C");
     }
 
     [Fact]
@@ -153,7 +153,7 @@ public class ILTechniqueTests : IDisposable
         var (context, result) = CreateContext();
         new ILNecroBit().Apply(module, context, result);
         if (result.EncryptedMethodBodies > 0)
-            Assert.Contains(module.Resources, r => r.Name == "__nb_data__");
+            Assert.Contains(module.Resources, r => r.Name == "\u200C\u200B\u200D");
     }
 
     [Fact]

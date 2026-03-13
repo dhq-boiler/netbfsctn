@@ -9,7 +9,7 @@ public class ILNecroBit : IObfuscationTechnique<ModuleDef>
 {
     public string Name => "NecroBit (IL)";
 
-    private const string ResourceName = "__nb_data__";
+    private const string ResourceName = "\u200C\u200B\u200D";
     private const byte XorKey = 0xC7;
 
     public void Apply(ModuleDef module, ObfuscationContext context, ObfuscationResult result)

@@ -9,7 +9,7 @@ public class ILAntiTampering : IObfuscationTechnique<ModuleDef>
 {
     public string Name => "Anti-Tampering (IL)";
 
-    private const string HashResourceName = "__tamper_hash__";
+    private const string HashResourceName = "\u200B\u200D\u200C";
 
     public void Apply(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
     {
@@ -114,7 +114,7 @@ public class ILAntiTampering : IObfuscationTechnique<ModuleDef>
         body.Instructions.Add(new Instruction(OpCodes.Bne_Un, exitOk));
 
         // hash mismatch → Environment.FailFast
-        body.Instructions.Add(new Instruction(OpCodes.Ldstr, "Integrity check failed"));
+        body.Instructions.Add(new Instruction(OpCodes.Ldnull));
         body.Instructions.Add(new Instruction(OpCodes.Call, failFast));
 
         body.Instructions.Add(exitOk);
