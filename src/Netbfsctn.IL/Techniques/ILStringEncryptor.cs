@@ -10,18 +10,25 @@ public class ILStringEncryptor : IObfuscationTechnique<ModuleDef>
 {
     public string Name => "文字列暗号化 (IL)";
 
+    private const string HelperTypeName = "\u200B\u200C\u200D";
+
     public void Apply(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
     {
         var encryptor = new XorStringEncryptor();
         var importer = new Importer(module);
 
-        // 復号ヘルパー型を注入
-        var helperType = InjectDecryptionHelper(module, importer);
+        // 既存のヘルパー型があれば再利用、なければ注入
+        var existingHelper = module.Types.FirstOrDefault(t => t.Name == HelperTypeName);
+        var helperType = existingHelper ?? InjectDecryptionHelper(module, importer);
         var decryptMethod = helperType.Methods.First(m => m.Name == "D");
 
         foreach (var type in module.Types)
         {
             if (type == helperType || type.Name == "<Module>")
+                continue;
+
+            // 他のヘルパー型（ゼロ幅文字名）をスキップ
+            if (IsInjectedHelperType(type.Name))
                 continue;
 
             foreach (var method in type.Methods)
@@ -191,6 +198,12 @@ public class ILStringEncryptor : IObfuscationTechnique<ModuleDef>
         module.Types.Add(helperType);
 
         return helperType;
+    }
+
+    private static bool IsInjectedHelperType(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        return name.All(c => c is '\u200B' or '\u200C' or '\u200D' or '\uFEFF');
     }
 
     private static string Truncate(string s, int maxLen)
