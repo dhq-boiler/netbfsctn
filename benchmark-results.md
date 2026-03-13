@@ -1,25 +1,25 @@
 # Netbfsctn Benchmark Results
 
-Date: 2026-03-13 23:43:57
+Date: 2026-03-13 23:49:28
 
 ## Summary
 
 | Scenario | Size | Size Δ% | Time(ms) | Time Δ% | Readable Names | Plaintext Strings | Avg IL/Method | Correct |
 |----------|------|---------|----------|---------|----------------|-------------------|---------------|---------|
-| Baseline | 15.5 KB | - | 93.5 | - | 81/89 | 70 | 21.3 | OK |
-| Rename Only | 15.5 KB | - | 93.3 | -0.1% | 30/89 | 70 | 21.3 | OK |
-| Strings Only | 26.5 KB | +71.0% | 95.6 | +2.3% | 82/91 | 0 | 161.7 | OK |
-| ControlFlow Only | 15.5 KB | - | 96.6 | +3.4% | 81/89 | 70 | 24.9 | OK |
-| DeadCode Only | 16.5 KB | +6.5% | 92.9 | -0.6% | 81/99 | 70 | 27.1 | OK |
-| Default (4 basic) | 29.0 KB | +87.1% | 92.0 | -1.5% | 31/102 | 0 | 146.0 | OK |
-| + Anti-ILDASM | 29.0 KB | +87.1% | 90.5 | -3.2% | 33/104 | 0 | 143.8 | OK |
-| + Anti-Debug | 29.5 KB | +90.3% | 92.2 | -1.3% | 32/103 | 0 | 145.5 | OK |
-| + Anti-Tamper | 29.5 KB | +90.3% | 92.0 | -1.6% | 32/104 | 1 | 141.9 | OK |
-| + NecroBit | 43.0 KB | +177.4% | 96.4 | +3.1% | 32/104 | 1 | 21.7 | OK |
-| + HideCalls | 51.5 KB | +232.3% | 96.1 | +2.9% | 31/104 | 0 | 330.6 | OK |
-| + Resources | 29.5 KB | +90.3% | 96.3 | +3.0% | 33/105 | 0 | 144.4 | OK |
-| + Virtualize | 46.0 KB | +196.8% | 89.6 | -4.1% | 32/104 | 597 | 179.0 | OK |
-| Full Protection | 85.5 KB | +451.6% | 90.2 | -3.4% | 38/115 | 9 | 303.8 | OK |
+| Baseline | 15.5 KB | - | 91.9 | - | 81/89 | 70 | 21.3 | OK |
+| Rename Only | 15.5 KB | - | 92.8 | +1.0% | 30/89 | 70 | 21.3 | OK |
+| Strings Only | 26.5 KB | +71.0% | 94.1 | +2.4% | 82/91 | 0 | 161.7 | OK |
+| ControlFlow Only | 15.5 KB | - | 92.9 | +1.1% | 81/89 | 70 | 24.9 | OK |
+| DeadCode Only | 16.0 KB | +3.2% | 93.4 | +1.7% | 81/99 | 70 | 27.1 | OK |
+| Default (4 basic) | 29.0 KB | +87.1% | 96.5 | +5.0% | 31/102 | 0 | 146.0 | OK |
+| + Anti-ILDASM | 29.0 KB | +87.1% | 88.0 | -4.2% | 33/104 | 0 | 143.8 | OK |
+| + Anti-Debug | 29.5 KB | +90.3% | 88.7 | -3.5% | 32/103 | 0 | 145.5 | OK |
+| + Anti-Tamper | 29.5 KB | +90.3% | 94.3 | +2.6% | 32/104 | 1 | 141.9 | OK |
+| + NecroBit | 43.0 KB | +177.4% | 92.8 | +1.0% | 32/104 | 1 | 21.7 | OK |
+| + HideCalls | 52.5 KB | +238.7% | 93.9 | +2.2% | 31/104 | 0 | 339.7 | OK |
+| + Resources | 29.5 KB | +90.3% | 94.6 | +2.9% | 33/105 | 0 | 144.4 | OK |
+| + Virtualize | 38.0 KB | +145.2% | 94.4 | +2.7% | 32/104 | 22 | 142.3 | OK |
+| Full Protection | 56.0 KB | +261.3% | 95.2 | +3.6% | 38/115 | 3 | 69.7 | OK |
 
 ## Baseline Assembly Details
 
@@ -41,7 +41,7 @@ Date: 2026-03-13 23:43:57
 - Has SuppressIldasm: False
 - Resources: 1
 - Size: 15.5 KB (+0.0%)
-- Runtime: 93.3ms (-0.1%)
+- Runtime: 92.8ms (+1.0%)
 - Correct: Yes
 
 ## Strings Only
@@ -55,7 +55,7 @@ Date: 2026-03-13 23:43:57
 - Has SuppressIldasm: False
 - Resources: 1
 - Size: 26.5 KB (+71.0%)
-- Runtime: 95.6ms (+2.3%)
+- Runtime: 94.1ms (+2.4%)
 - Correct: Yes
 
 ## ControlFlow Only
@@ -69,7 +69,7 @@ Date: 2026-03-13 23:43:57
 - Has SuppressIldasm: False
 - Resources: 1
 - Size: 15.5 KB (+0.0%)
-- Runtime: 96.6ms (+3.4%)
+- Runtime: 92.9ms (+1.1%)
 - Correct: Yes
 
 ## DeadCode Only
@@ -82,8 +82,8 @@ Date: 2026-03-13 23:43:57
 - Avg IL/method: 27.1
 - Has SuppressIldasm: False
 - Resources: 1
-- Size: 16.5 KB (+6.5%)
-- Runtime: 92.9ms (-0.6%)
+- Size: 16.0 KB (+3.2%)
+- Runtime: 93.4ms (+1.7%)
 - Correct: Yes
 
 ## Default (4 basic)
@@ -97,7 +97,7 @@ Date: 2026-03-13 23:43:57
 - Has SuppressIldasm: False
 - Resources: 1
 - Size: 29.0 KB (+87.1%)
-- Runtime: 92.0ms (-1.5%)
+- Runtime: 96.5ms (+5.0%)
 - Correct: Yes
 
 ## + Anti-ILDASM
@@ -111,7 +111,7 @@ Date: 2026-03-13 23:43:57
 - Has SuppressIldasm: False
 - Resources: 1
 - Size: 29.0 KB (+87.1%)
-- Runtime: 90.5ms (-3.2%)
+- Runtime: 88.0ms (-4.2%)
 - Correct: Yes
 
 ## + Anti-Debug
@@ -125,7 +125,7 @@ Date: 2026-03-13 23:43:57
 - Has SuppressIldasm: False
 - Resources: 1
 - Size: 29.5 KB (+90.3%)
-- Runtime: 92.2ms (-1.3%)
+- Runtime: 88.7ms (-3.5%)
 - Correct: Yes
 
 ## + Anti-Tamper
@@ -139,7 +139,7 @@ Date: 2026-03-13 23:43:57
 - Has SuppressIldasm: False
 - Resources: 2
 - Size: 29.5 KB (+90.3%)
-- Runtime: 92.0ms (-1.6%)
+- Runtime: 94.3ms (+2.6%)
 - Correct: Yes
 
 ## + NecroBit
@@ -153,7 +153,7 @@ Date: 2026-03-13 23:43:57
 - Has SuppressIldasm: False
 - Resources: 2
 - Size: 43.0 KB (+177.4%)
-- Runtime: 96.4ms (+3.1%)
+- Runtime: 92.8ms (+1.0%)
 - Correct: Yes
 
 ## + HideCalls
@@ -162,12 +162,12 @@ Date: 2026-03-13 23:43:57
 - Methods: 64 (readable: 25)
 - Fields: 29 (readable: 5)
 - Plaintext strings: 0
-- Total IL instructions: 21157
-- Avg IL/method: 330.6
+- Total IL instructions: 21741
+- Avg IL/method: 339.7
 - Has SuppressIldasm: False
 - Resources: 1
-- Size: 51.5 KB (+232.3%)
-- Runtime: 96.1ms (+2.9%)
+- Size: 52.5 KB (+238.7%)
+- Runtime: 93.9ms (+2.2%)
 - Correct: Yes
 
 ## + Resources
@@ -181,7 +181,7 @@ Date: 2026-03-13 23:43:57
 - Has SuppressIldasm: False
 - Resources: 1
 - Size: 29.5 KB (+90.3%)
-- Runtime: 96.3ms (+3.0%)
+- Runtime: 94.6ms (+2.9%)
 - Correct: Yes
 
 ## + Virtualize
@@ -189,13 +189,13 @@ Date: 2026-03-13 23:43:57
 - Types: 11 (readable: 1)
 - Methods: 64 (readable: 26)
 - Fields: 29 (readable: 5)
-- Plaintext strings: 597
-- Total IL instructions: 11454
-- Avg IL/method: 179.0
+- Plaintext strings: 22
+- Total IL instructions: 9110
+- Avg IL/method: 142.3
 - Has SuppressIldasm: False
-- Resources: 2
-- Size: 46.0 KB (+196.8%)
-- Runtime: 89.6ms (-4.1%)
+- Resources: 3
+- Size: 38.0 KB (+145.2%)
+- Runtime: 94.4ms (+2.7%)
 - Correct: Yes
 
 ## Full Protection
@@ -203,11 +203,11 @@ Date: 2026-03-13 23:43:57
 - Types: 15 (readable: 2)
 - Methods: 70 (readable: 30)
 - Fields: 30 (readable: 6)
-- Plaintext strings: 9
-- Total IL instructions: 21268
-- Avg IL/method: 303.8
+- Plaintext strings: 3
+- Total IL instructions: 4876
+- Avg IL/method: 69.7
 - Has SuppressIldasm: False
-- Resources: 4
-- Size: 85.5 KB (+451.6%)
-- Runtime: 90.2ms (-3.4%)
+- Resources: 5
+- Size: 56.0 KB (+261.3%)
+- Runtime: 95.2ms (+3.6%)
 - Correct: Yes
