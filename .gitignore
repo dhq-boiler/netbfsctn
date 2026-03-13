@@ -1,3 +1,6 @@
 ﻿.claude/settings.local.json
+.vs/
 bin/
 obj/
+nul
+-v
