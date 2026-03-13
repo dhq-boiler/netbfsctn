@@ -22,7 +22,7 @@ public class ILStringEncryptor : IObfuscationTechnique<ModuleDef>
         var helperType = existingHelper ?? InjectDecryptionHelper(module, importer);
         var decryptMethod = helperType.Methods.First(m => m.Name == "D");
 
-        foreach (var type in module.Types)
+        foreach (var type in module.GetTypes())
         {
             if (type == helperType || type.Name == "<Module>")
                 continue;
@@ -58,7 +58,7 @@ public class ILStringEncryptor : IObfuscationTechnique<ModuleDef>
                 continue;
 
             var original = (string)instr.Operand;
-            if (string.IsNullOrEmpty(original))
+            if (original == null)
                 continue;
 
             var key = encryptor.GenerateKey();
