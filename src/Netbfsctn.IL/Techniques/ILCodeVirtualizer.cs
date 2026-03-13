@@ -10,7 +10,8 @@ public class ILCodeVirtualizer : IObfuscationTechnique<ModuleDef>
 {
     public string Name => "コード仮想化 (IL)";
 
-    private const string BytecodeResourcePrefix = "__vm_bc_";
+    private const string BytecodeResourceName = "\u200B\u200C\u200D\u200B";
+    private const string TokenTableResourceName = "\u200D\u200C\u200B\u200D";
 
     public void Apply(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
     {
@@ -45,7 +46,7 @@ public class ILCodeVirtualizer : IObfuscationTechnique<ModuleDef>
 
                 virtualizedData[methodId] = bytecode;
 
-                ReplaceWithVmCall(method, module, importer, executeMethod, methodId, translator.MetadataTokenTable);
+                ReplaceWithVmCall(method, module, importer, executeMethod, methodId);
 
                 methodId++;
                 result.VirtualizedMethods++;
@@ -57,7 +58,12 @@ public class ILCodeVirtualizer : IObfuscationTechnique<ModuleDef>
         {
             var resourceData = SerializeVmData(virtualizedData);
             module.Resources.Add(new EmbeddedResource(
-                BytecodeResourcePrefix + "data", resourceData, ManifestResourceAttributes.Private));
+                BytecodeResourceName, resourceData, ManifestResourceAttributes.Private));
+
+            // tokenTableをリソースとしてシリアライズ
+            var tokenData = SerializeTokenTable(translator.MetadataTokenTable);
+            module.Resources.Add(new EmbeddedResource(
+                TokenTableResourceName, tokenData, ManifestResourceAttributes.Private));
         }
     }
 
@@ -76,7 +82,7 @@ public class ILCodeVirtualizer : IObfuscationTechnique<ModuleDef>
 
     private static void ReplaceWithVmCall(
         MethodDef method, ModuleDef module, Importer importer,
-        MethodDef executeMethod, int methodId, List<IFullName> tokenTable)
+        MethodDef executeMethod, int methodId)
     {
         var body = new CilBody();
         method.Body = body;
@@ -100,7 +106,7 @@ public class ILCodeVirtualizer : IObfuscationTechnique<ModuleDef>
 
         // stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(...)
         body.Instructions.Add(new Instruction(OpCodes.Call, getExecAsm));
-        body.Instructions.Add(new Instruction(OpCodes.Ldstr, BytecodeResourcePrefix + "data"));
+        body.Instructions.Add(new Instruction(OpCodes.Ldstr, BytecodeResourceName));
         body.Instructions.Add(new Instruction(OpCodes.Callvirt, getManifestStream));
         body.Instructions.Add(new Instruction(OpCodes.Stloc_1));
 
@@ -161,17 +167,6 @@ public class ILCodeVirtualizer : IObfuscationTechnique<ModuleDef>
             body.Instructions.Add(new Instruction(OpCodes.Stelem_Ref));
         }
 
-        // tokens 配列
-        body.Instructions.Add(Instruction.CreateLdcI4(tokenTable.Count));
-        body.Instructions.Add(new Instruction(OpCodes.Newarr, module.CorLibTypes.String.TypeDefOrRef));
-        for (var i = 0; i < tokenTable.Count; i++)
-        {
-            body.Instructions.Add(new Instruction(OpCodes.Dup));
-            body.Instructions.Add(Instruction.CreateLdcI4(i));
-            body.Instructions.Add(new Instruction(OpCodes.Ldstr, tokenTable[i].FullName));
-            body.Instructions.Add(new Instruction(OpCodes.Stelem_Ref));
-        }
-
         body.Instructions.Add(new Instruction(OpCodes.Call, executeMethod));
 
         // 戻り値を処理
@@ -207,6 +202,16 @@ public class ILCodeVirtualizer : IObfuscationTechnique<ModuleDef>
                 body.Instructions.Add(new Instruction(OpCodes.Unbox_Any, retType.ToTypeDefOrRef()));
             body.Instructions.Add(new Instruction(OpCodes.Ret));
         }
+    }
+
+    private static byte[] SerializeTokenTable(List<IFullName> tokenTable)
+    {
+        using var ms = new MemoryStream();
+        using var writer = new BinaryWriter(ms);
+        writer.Write(tokenTable.Count);
+        foreach (var token in tokenTable)
+            writer.Write(token.FullName);
+        return ms.ToArray();
     }
 
     private static byte[] SerializeVmData(Dictionary<int, byte[]> data)

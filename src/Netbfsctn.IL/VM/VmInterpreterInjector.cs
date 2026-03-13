@@ -15,11 +15,10 @@ public class VmInterpreterInjector
 
         var byteArraySig = new SZArraySig(module.CorLibTypes.Byte);
         var objectArraySig = new SZArraySig(module.CorLibTypes.Object);
-        var stringArraySig = new SZArraySig(module.CorLibTypes.String);
 
         var executeMethod = new MethodDefUser(
             "E",
-            MethodSig.CreateStatic(module.CorLibTypes.Object, byteArraySig, objectArraySig, stringArraySig),
+            MethodSig.CreateStatic(module.CorLibTypes.Object, byteArraySig, objectArraySig),
             dnlib.DotNet.MethodImplAttributes.IL | dnlib.DotNet.MethodImplAttributes.Managed,
             dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.Static
                 | dnlib.DotNet.MethodAttributes.HideBySig);
