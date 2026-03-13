@@ -78,8 +78,42 @@ public class ILHideMethodCalls : IObfuscationTechnique<ModuleDef>
     {
         var methodSig = targetMethod.MethodSig;
         var paramCount = methodSig!.Params.Count;
+        var hasThis = methodSig.HasThis && callInstr.OpCode != OpCodes.Newobj;
 
         var newInstructions = new List<Instruction>();
+
+        // スタック上の引数を object[] に詰め替えるため、ローカル変数を追加
+        // args 配列用のローカル
+        var argsLocal = new Local(new SZArraySig(module.CorLibTypes.Object));
+        body.Variables.Add(argsLocal);
+
+        // instance 用のローカル (hasThis の場合)
+        Local? instanceLocal = null;
+        if (hasThis)
+        {
+            instanceLocal = new Local(module.CorLibTypes.Object);
+            body.Variables.Add(instanceLocal);
+        }
+
+        // パラメータ用のローカル変数を追加 (スタックから逆順に取り出すため)
+        var paramLocals = new Local[paramCount];
+        for (var i = 0; i < paramCount; i++)
+        {
+            paramLocals[i] = new Local(methodSig.Params[i]);
+            body.Variables.Add(paramLocals[i]);
+        }
+
+        // スタックから引数を逆順にローカルに退避
+        for (var i = paramCount - 1; i >= 0; i--)
+        {
+            newInstructions.Add(new Instruction(OpCodes.Stloc, paramLocals[i]));
+        }
+
+        // this がある場合、インスタンスもスタックから退避
+        if (hasThis && instanceLocal != null)
+        {
+            newInstructions.Add(new Instruction(OpCodes.Stloc, instanceLocal));
+        }
 
         // typeName
         newInstructions.Add(new Instruction(OpCodes.Ldstr, targetMethod.DeclaringType.FullName));
@@ -104,8 +138,29 @@ public class ILHideMethodCalls : IObfuscationTechnique<ModuleDef>
             newInstructions.Add(new Instruction(OpCodes.Stelem_Ref));
         }
 
-        // args = null
-        newInstructions.Add(new Instruction(OpCodes.Ldnull));
+        // args: object[] 配列を構築
+        newInstructions.Add(Instruction.CreateLdcI4(paramCount));
+        newInstructions.Add(new Instruction(OpCodes.Newarr, module.CorLibTypes.Object.TypeDefOrRef));
+        newInstructions.Add(new Instruction(OpCodes.Stloc, argsLocal));
+
+        for (var i = 0; i < paramCount; i++)
+        {
+            newInstructions.Add(new Instruction(OpCodes.Ldloc, argsLocal));
+            newInstructions.Add(Instruction.CreateLdcI4(i));
+            newInstructions.Add(new Instruction(OpCodes.Ldloc, paramLocals[i]));
+            // 値型はボックス化
+            if (methodSig.Params[i].IsValueType)
+                newInstructions.Add(new Instruction(OpCodes.Box, methodSig.Params[i].ToTypeDefOrRef()));
+            newInstructions.Add(new Instruction(OpCodes.Stelem_Ref));
+        }
+
+        // instance 引数 (hasThis の場合はローカルから、そうでなければ null)
+        if (hasThis && instanceLocal != null)
+            newInstructions.Add(new Instruction(OpCodes.Ldloc, instanceLocal));
+        else
+            newInstructions.Add(new Instruction(OpCodes.Ldnull));
+
+        newInstructions.Add(new Instruction(OpCodes.Ldloc, argsLocal));
 
         // ヘルパー呼び出し
         newInstructions.Add(new Instruction(OpCodes.Call, invokeMethod));
@@ -148,7 +203,8 @@ public class ILHideMethodCalls : IObfuscationTechnique<ModuleDef>
         var invokeMethod = new MethodDefUser(
             "I",
             MethodSig.CreateStatic(module.CorLibTypes.Object,
-                module.CorLibTypes.String, module.CorLibTypes.String, typeArraySig, objectArraySig),
+                module.CorLibTypes.String, module.CorLibTypes.String, typeArraySig,
+                module.CorLibTypes.Object, objectArraySig),
             dnlib.DotNet.MethodImplAttributes.IL | dnlib.DotNet.MethodImplAttributes.Managed,
             dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.Static
                 | dnlib.DotNet.MethodAttributes.HideBySig);
@@ -204,10 +260,10 @@ public class ILHideMethodCalls : IObfuscationTechnique<ModuleDef>
         body.Instructions.Add(new Instruction(OpCodes.Callvirt, getMethodRef));
         body.Instructions.Add(new Instruction(OpCodes.Stloc_1));
 
-        // return mi.Invoke(null, args)
+        // return mi.Invoke(instance, args)
         body.Instructions.Add(new Instruction(OpCodes.Ldloc_1));
-        body.Instructions.Add(new Instruction(OpCodes.Ldnull));
-        body.Instructions.Add(new Instruction(OpCodes.Ldarg_3));
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_3)); // instance (object)
+        body.Instructions.Add(new Instruction(OpCodes.Ldarg_S, invokeMethod.Parameters[4])); // args (object[])
         body.Instructions.Add(new Instruction(OpCodes.Callvirt, invokeRef));
         body.Instructions.Add(new Instruction(OpCodes.Ret));
 
