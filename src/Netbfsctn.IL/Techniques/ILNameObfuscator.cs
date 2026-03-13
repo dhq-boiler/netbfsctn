@@ -69,7 +69,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             }
         }
 
-        // プロパティの名前変更
+        // プロパティの名前変更（getter/setterメソッド名も連動）
         if (options.EnableRenameProperties)
         {
             foreach (var property in type.Properties)
@@ -81,6 +81,19 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 context.Logger.Verbose($"プロパティ: {property.Name} -> {newName}");
                 property.Name = newName;
                 result.RenamedSymbols++;
+
+                if (property.GetMethod != null && !property.GetMethod.IsPublic)
+                {
+                    var getterName = "get_" + newName;
+                    context.NameMap[property.GetMethod.FullName] = getterName;
+                    property.GetMethod.Name = getterName;
+                }
+                if (property.SetMethod != null && !property.SetMethod.IsPublic)
+                {
+                    var setterName = "set_" + newName;
+                    context.NameMap[property.SetMethod.FullName] = setterName;
+                    property.SetMethod.Name = setterName;
+                }
             }
         }
 
