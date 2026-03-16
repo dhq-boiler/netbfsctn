@@ -26,6 +26,9 @@ public class ILAntiDebug : IObfuscationTechnique<ModuleDef>
         {
             if (type.Name == "<Module>")
                 continue;
+            // 他のテクニックが注入したヘルパー型はスキップ
+            if (IsInjectedHelperType(type.Name))
+                continue;
 
             foreach (var method in type.Methods)
             {
@@ -87,5 +90,11 @@ public class ILAntiDebug : IObfuscationTechnique<ModuleDef>
         body.Instructions.Insert(idx++, new Instruction(OpCodes.Ldc_I4_M1));
         body.Instructions.Insert(idx++, new Instruction(OpCodes.Call, exitRef));
         body.Instructions.Insert(idx, skipLabel);
+    }
+
+    private static bool IsInjectedHelperType(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        return name.All(c => c is '\u200B' or '\u200C' or '\u200D' or '\uFEFF');
     }
 }

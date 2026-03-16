@@ -19,6 +19,9 @@ public class ILDeadCodeInserter : IObfuscationTechnique<ModuleDef>
         {
             if (type.Name == "<Module>")
                 continue;
+            // 他のテクニックが注入したヘルパー型はスキップ
+            if (IsInjectedHelperType(type.Name))
+                continue;
 
             foreach (var method in type.Methods)
             {
@@ -100,5 +103,11 @@ public class ILDeadCodeInserter : IObfuscationTechnique<ModuleDef>
                 context.Logger.Verbose($"ダミーメソッド追加: {dummyName} in {type.Name}");
             }
         }
+    }
+
+    private static bool IsInjectedHelperType(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        return name.All(c => c is '\u200B' or '\u200C' or '\u200D' or '\uFEFF');
     }
 }
