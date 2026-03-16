@@ -15,6 +15,9 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
         {
             if (type.Name == "<Module>")
                 continue;
+            // 他のテクニックが注入したヘルパー型はスキップ
+            if (IsInjectedHelperType(type.Name))
+                continue;
 
             foreach (var method in type.Methods)
             {
@@ -24,9 +27,11 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
                 // switch 命令を含むメソッドはスキップ（ステートマシン変換と衝突する）
                 if (method.Body.Instructions.Any(i => i.OpCode == OpCodes.Switch)) continue;
 
+                var hasReturnValue = method.ReturnType != null
+                    && method.ReturnType.ElementType != ElementType.Void;
                 try
                 {
-                    TransformToStatesMachine(method, module, context);
+                    TransformToStatesMachine(method, module, context, hasReturnValue);
                     result.ObfuscatedMethods++;
                 }
                 catch (Exception ex)
@@ -37,7 +42,7 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
         }
     }
 
-    private void TransformToStatesMachine(MethodDef method, ModuleDef module, ObfuscationContext context)
+    private void TransformToStatesMachine(MethodDef method, ModuleDef module, ObfuscationContext context, bool hasReturnValue)
     {
         var body = method.Body;
 
@@ -47,9 +52,51 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
             return;
 
         // スタック非中立なブロックを隣接ブロックと結合してスタック中立にする
-        blocks = MergeToStackNeutralBlocks(blocks);
+        blocks = MergeToStackNeutralBlocks(blocks, hasReturnValue);
         if (blocks.Count < 2)
             return;
+
+        // 全ブロックがスタック中立であることを検証（ret/throw で終わるブロックを除く）
+        foreach (var block in blocks)
+        {
+            var lastOp = block[^1].OpCode;
+            if (lastOp == OpCodes.Ret || lastOp == OpCodes.Throw)
+                continue;
+            if (CalculateBlockStackDelta(block, hasReturnValue) != 0)
+                return; // スタック中立にできないメソッドは変換をスキップ
+        }
+
+        // ブロック内の命令 → ブロックインデックスのマップ
+        var preInstrToBlock = new Dictionary<Instruction, int>();
+        for (var bi = 0; bi < blocks.Count; bi++)
+            foreach (var blockInstr in blocks[bi])
+                preInstrToBlock[blockInstr] = bi;
+
+        // クロスブロック分岐がスタック深度 0 で発生することを検証。
+        // 非ゼロ深度でのクロスブロック分岐は状態マシン経由にできない。
+        foreach (var block in blocks)
+        {
+            var depth = 0;
+            foreach (var instr in block)
+            {
+                // 分岐命令の場合、ターゲットが別ブロックなら深度チェック
+                if (instr.OpCode.FlowControl is FlowControl.Cond_Branch or FlowControl.Branch)
+                {
+                    if (instr.Operand is Instruction target
+                        && preInstrToBlock.TryGetValue(target, out var targetBi)
+                        && preInstrToBlock.TryGetValue(instr, out var sourceBi)
+                        && targetBi != sourceBi
+                        && depth != 0)
+                    {
+                        return; // 非ゼロ深度のクロスブロック分岐あり → スキップ
+                    }
+                }
+
+                depth -= EstimateStackPop(instr, hasReturnValue);
+                if (depth < 0) depth = 0;
+                depth += EstimateStackPush(instr);
+            }
+        }
 
         context.Logger.Verbose($"制御フロー変換: {method.Name} ({blocks.Count} ブロック)");
 
@@ -88,9 +135,22 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
 
         newInstructions.Add(new Instruction(OpCodes.Switch, blockLabels));
 
-        // ret (デフォルト - 到達しないはず)
-        var exitLabel = new Instruction(OpCodes.Ret);
+        // デフォルトケース (到達しないはず) - ldnull + throw で CLR 検証を通す
+        // ret を使うと戻り値ありメソッドでスタック不整合になる
+        var exitLabel = new Instruction(OpCodes.Ldnull);
+        var exitThrow = new Instruction(OpCodes.Throw);
         newInstructions.Add(new Instruction(OpCodes.Br, exitLabel));
+
+        // 全命令 → 所属するブロックインデックスのマップ構築
+        // （結合前のブロック先頭だけでなく、全命令をカバー）
+        var instrToBlockIdx = new Dictionary<Instruction, int>();
+        for (var i = 0; i < blocks.Count; i++)
+        {
+            foreach (var blockInstr in blocks[i])
+            {
+                instrToBlockIdx[blockInstr] = i;
+            }
+        }
 
         // 各ブロックをシャッフルされた順序で配置
         for (var shuffledIdx = 0; shuffledIdx < blocks.Count; shuffledIdx++)
@@ -122,6 +182,7 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
         }
 
         newInstructions.Add(exitLabel);
+        newInstructions.Add(exitThrow);
 
         // 命令を置換
         body.Instructions.Clear();
@@ -129,16 +190,75 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
         {
             body.Instructions.Add(instr);
         }
+
+        // クロスケースブランチをステートマシン経由に書き換え:
+        // 元の分岐ターゲットが他ブロックの先頭を参照している場合、
+        // そのブロックの状態番号を設定してディスパッチャに戻るように変換する。
+        // 条件分岐はフォールスルーを壊さないようアウトオブラインに配置する。
+        var outOfLineBlocks = new List<Instruction>();
+        var instrCount = body.Instructions.Count; // 元の命令数を記録
+        for (var i = 0; i < instrCount; i++)
+        {
+            var instr = body.Instructions[i];
+
+            // この命令が所属するブロックを特定
+            instrToBlockIdx.TryGetValue(instr, out var currentBlockIdx);
+
+            // 条件分岐: ターゲットが別ブロックなら書き換え
+            // フォールスルーを壊さないよう、状態設定コードをメソッド末尾に配置
+            if (instr.OpCode.FlowControl == FlowControl.Cond_Branch
+                && instr.Operand is Instruction condTarget
+                && instrToBlockIdx.TryGetValue(condTarget, out var targetBlockIdx)
+                && targetBlockIdx != currentBlockIdx)
+            {
+                var stateSet = Instruction.CreateLdcI4(targetBlockIdx);
+                instr.Operand = stateSet;
+
+                // アウトオブラインブロック: ldc.i4 state → stloc → br loopStart
+                outOfLineBlocks.Add(stateSet);
+                outOfLineBlocks.Add(new Instruction(OpCodes.Stloc, body.Variables[stateIndex]));
+                outOfLineBlocks.Add(new Instruction(OpCodes.Br, loopStart));
+            }
+
+            // 無条件分岐: ターゲットが別ブロックなら書き換え
+            // インラインで置換可（フォールスルーなし）
+            if (instr.OpCode.FlowControl == FlowControl.Branch
+                && instr.OpCode.Code != Code.Leave && instr.OpCode.Code != Code.Leave_S
+                && instr.Operand is Instruction brTarget
+                && instrToBlockIdx.TryGetValue(brTarget, out var brTargetBlockIdx)
+                && brTargetBlockIdx != currentBlockIdx)
+            {
+                instr.OpCode = OpCodes.Ldc_I4;
+                instr.Operand = brTargetBlockIdx;
+
+                var stateStore = new Instruction(OpCodes.Stloc, body.Variables[stateIndex]);
+                var brToLoop = new Instruction(OpCodes.Br, loopStart);
+                body.Instructions.Insert(i + 1, stateStore);
+                body.Instructions.Insert(i + 2, brToLoop);
+                instrCount += 2;
+                i += 2;
+            }
+        }
+
+        // アウトオブラインブロックをメソッド末尾に追加
+        foreach (var outInstr in outOfLineBlocks)
+        {
+            body.Instructions.Add(outInstr);
+        }
+
+        // dnlib の maxStack 再計算は状態マシンの複雑な制御フローで失敗するためバイパス。
+        // 正確な maxStack は ILObfuscationPipeline が全テクニック適用後に計算する。
+        body.KeepOldMaxStack = true;
     }
 
-    private static List<List<Instruction>> MergeToStackNeutralBlocks(List<List<Instruction>> blocks)
+    private static List<List<Instruction>> MergeToStackNeutralBlocks(List<List<Instruction>> blocks, bool hasReturnValue)
     {
         var merged = new List<List<Instruction>>();
         var current = new List<Instruction>(blocks[0]);
 
         for (var i = 1; i < blocks.Count; i++)
         {
-            if (CalculateBlockStackDelta(current) == 0)
+            if (CalculateBlockStackDelta(current, hasReturnValue) == 0)
             {
                 // 現在のブロックはスタック中立なので確定
                 merged.Add(current);
@@ -154,7 +274,7 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
         // 最後のブロック
         if (current.Count > 0)
         {
-            if (CalculateBlockStackDelta(current) != 0)
+            if (CalculateBlockStackDelta(current, hasReturnValue) != 0)
             {
                 // 最後のブロックが非中立なら前のブロックと結合
                 if (merged.Count > 0)
@@ -215,28 +335,27 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
         return blocks;
     }
 
-    private static int CalculateBlockStackDelta(List<Instruction> block)
+    private static int CalculateBlockStackDelta(List<Instruction> block, bool hasReturnValue)
     {
         var delta = 0;
         foreach (var instr in block)
         {
-            delta -= EstimateStackPop(instr);
+            delta -= EstimateStackPop(instr, hasReturnValue);
             delta += EstimateStackPush(instr);
         }
         return delta;
     }
 
-    private static int EstimateStackPop(Instruction instr)
+    private static int EstimateStackPop(Instruction instr, bool hasReturnValue)
     {
         var opCode = instr.OpCode;
 
         // call/callvirt/newobj は引数の数に依存
         if (opCode.Code is Code.Call or Code.Callvirt or Code.Newobj)
         {
-            if (instr.Operand is IMethodDefOrRef methodRef)
+            var sig = GetMethodSig(instr);
+            if (sig != null)
             {
-                var sig = methodRef.MethodSig;
-                if (sig == null) return 0;
                 var count = sig.Params.Count;
                 // インスタンスメソッドは this を消費
                 if (sig.HasThis && opCode.Code != Code.Newobj)
@@ -245,6 +364,10 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
             }
             return 0;
         }
+
+        // ret は Varpop: 戻り値があるメソッドでは1つポップ、void なら0
+        if (opCode.Code == Code.Ret)
+            return hasReturnValue ? 1 : 0;
 
         return opCode.StackBehaviourPop switch
         {
@@ -269,13 +392,9 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
         // call/callvirt: 戻り値があれば1プッシュ
         if (opCode.Code is Code.Call or Code.Callvirt)
         {
-            if (instr.Operand is IMethodDefOrRef methodRef)
-            {
-                var sig = methodRef.MethodSig;
-                if (sig == null) return 0;
-                return sig.RetType != null && sig.RetType.ElementType != ElementType.Void ? 1 : 0;
-            }
-            return 0;
+            var sig = GetMethodSig(instr);
+            if (sig == null) return 0;
+            return sig.RetType != null && sig.RetType.ElementType != ElementType.Void ? 1 : 0;
         }
 
         // newobj は常に1プッシュ
@@ -291,5 +410,24 @@ public class ILControlFlowObfuscator : IObfuscationTechnique<ModuleDef>
             StackBehaviour.Push1_push1 => 2,
             _ => 0
         };
+    }
+
+    /// <summary>
+    /// IMethodDefOrRef と MethodSpec の両方からメソッドシグネチャを取得する。
+    /// ジェネリックメソッド呼び出し (MethodSpec) にも対応。
+    /// </summary>
+    private static MethodSig? GetMethodSig(Instruction instr)
+    {
+        if (instr.Operand is IMethodDefOrRef methodRef)
+            return methodRef.MethodSig;
+        if (instr.Operand is MethodSpec methodSpec)
+            return methodSpec.Method?.MethodSig;
+        return null;
+    }
+
+    private static bool IsInjectedHelperType(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        return name.All(c => c is '\u200B' or '\u200C' or '\u200D' or '\uFEFF');
     }
 }
