@@ -184,6 +184,7 @@ public class ILTechniqueTests : IDisposable
         using var module = LoadSampleModule();
         var (context, result) = CreateContext();
         new ILHideMethodCalls().Apply(module, context, result);
+        PrepareForWrite(module);
         var outPath = Path.Combine(_tempDir, "hide_calls.dll");
         module.Write(outPath);
         Assert.True(File.Exists(outPath));
@@ -321,6 +322,7 @@ public class ILTechniqueTests : IDisposable
         Assert.True(result.AntiDebugApplied);
         Assert.True(result.AntiTamperingApplied);
 
+        PrepareForWrite(module);
         var outPath = Path.Combine(_tempDir, "all_techniques.dll");
         module.Write(outPath);
         Assert.True(File.Exists(outPath));
@@ -334,5 +336,23 @@ public class ILTechniqueTests : IDisposable
         using var module = LoadSampleModule();
         // テスト用アセンブリは純粋 .NET なので IsILOnly = true
         Assert.True(module.IsILOnly);
+    }
+
+    /// <summary>
+    /// 個別テクニック適用後に module.Write() する場合、
+    /// パイプラインの maxStack 推定を経由しないため KeepOldMaxStack を設定する。
+    /// </summary>
+    private static void PrepareForWrite(ModuleDef module)
+    {
+        foreach (var type in module.GetTypes())
+        {
+            foreach (var method in type.Methods)
+            {
+                if (!method.HasBody) continue;
+                method.Body.SimplifyBranches();
+                method.Body.OptimizeBranches();
+                method.Body.KeepOldMaxStack = true;
+            }
+        }
     }
 }
