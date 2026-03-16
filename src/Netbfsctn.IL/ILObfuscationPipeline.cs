@@ -1,5 +1,6 @@
 using System.Text.Json;
 using dnlib.DotNet;
+using dnlib.DotNet.Emit;
 using dnlib.DotNet.Writer;
 using Netbfsctn.Core.Pipeline;
 using Netbfsctn.Core.Techniques;
@@ -102,53 +103,39 @@ public class ILObfuscationPipeline : IObfuscationPipeline
         if (!string.IsNullOrEmpty(dir))
             Directory.CreateDirectory(dir);
 
-        // 難読化後のメソッドでブランチ最適化と検証
+        // 難読化後のメソッドでブランチ最適化
         foreach (var type in module.GetTypes())
         {
             foreach (var method in type.Methods)
             {
                 if (!method.HasBody) continue;
                 var body = method.Body;
-
-                // 不正な分岐ターゲットを検出
-                var instrSet = new HashSet<dnlib.DotNet.Emit.Instruction>(body.Instructions);
-                var hasInvalid = false;
-                foreach (var instr in body.Instructions)
-                {
-                    if (instr.Operand is dnlib.DotNet.Emit.Instruction target && !instrSet.Contains(target))
-                    {
-                        hasInvalid = true;
-                        break;
-                    }
-                    if (instr.Operand is dnlib.DotNet.Emit.Instruction[] targets)
-                    {
-                        foreach (var t in targets)
-                        {
-                            if (!instrSet.Contains(t))
-                            {
-                                hasInvalid = true;
-                                break;
-                            }
-                        }
-                        if (hasInvalid) break;
-                    }
-                }
-
-                if (hasInvalid)
-                {
-                    // 不正な参照がある場合は元の maxStack を保持して書き出し
-                    body.KeepOldMaxStack = true;
-                    logger.Verbose($"不正な分岐参照を検出: {method.FullName} - KeepOldMaxStack で保存");
-                    continue;
-                }
-
-                // maxStack を再計算させる（KeepOldMaxStack = false がデフォルト）
                 body.SimplifyBranches();
                 body.OptimizeBranches();
             }
         }
 
+        // KeepOldMaxStack が設定されたメソッド（制御フロー難読化済み）の maxStack を
+        // 最終命令列から正確に再計算する。後続テクニックが命令を追加・変更している可能性があるため、
+        // 全テクニック適用後にここで計算する必要がある。
+        foreach (var type in module.GetTypes())
+        {
+            foreach (var method in type.Methods)
+            {
+                if (!method.HasBody) continue;
+                if (!method.Body.KeepOldMaxStack) continue;
+                method.Body.MaxStack = (ushort)CalculateMaxStack(method.Body, method);
+            }
+        }
+
         logger.Info($"保存中: {outputPath}");
+        WriteModule(module, outputPath, isMixedMode);
+
+        return result;
+    }
+
+    private static void WriteModule(ModuleDefMD module, string outputPath, bool isMixedMode)
+    {
         if (isMixedMode)
         {
             var nativeOptions = new NativeModuleWriterOptions(module, optimizeImageSize: false);
@@ -158,8 +145,6 @@ public class ILObfuscationPipeline : IObfuscationPipeline
         {
             module.Write(outputPath);
         }
-
-        return result;
     }
 
     private static List<IObfuscationTechnique<ModuleDef>> BuildTechniqueList(ObfuscationOptions options)
@@ -209,5 +194,160 @@ public class ILObfuscationPipeline : IObfuscationPipeline
         var name = Path.GetFileNameWithoutExtension(inputPath);
         var ext = Path.GetExtension(inputPath);
         return Path.Combine(dir, $"{name}.obfuscated{ext}");
+    }
+
+    /// <summary>
+    /// 制御フローグラフを走査して最大スタック深度を計算する。
+    /// 分岐先にスタック深度を伝播し、固定点に達するまで反復する。
+    /// </summary>
+    private static int CalculateMaxStack(CilBody body, MethodDef method)
+    {
+        if (body.Instructions.Count == 0)
+            return 0;
+
+        var hasReturnValue = method.ReturnType != null
+            && method.ReturnType.ElementType != ElementType.Void;
+
+        // 命令インデックスマップ
+        var instrToIdx = new Dictionary<Instruction, int>(body.Instructions.Count);
+        for (var i = 0; i < body.Instructions.Count; i++)
+            instrToIdx[body.Instructions[i]] = i;
+
+        // 各命令の入口スタック深度 (-1 = 未到達)
+        var depthAt = new int[body.Instructions.Count];
+        Array.Fill(depthAt, -1);
+        depthAt[0] = 0;
+
+        // 例外ハンドラの開始点はスタック深度1 (例外オブジェクト)
+        foreach (var eh in body.ExceptionHandlers)
+        {
+            if (eh.HandlerStart != null && instrToIdx.TryGetValue(eh.HandlerStart, out var hIdx))
+                depthAt[hIdx] = Math.Max(depthAt[hIdx], 1);
+            if (eh.FilterStart != null && instrToIdx.TryGetValue(eh.FilterStart, out var fIdx))
+                depthAt[fIdx] = Math.Max(depthAt[fIdx], 1);
+        }
+
+        var maxDepth = 0;
+        var changed = true;
+        var iterations = 0;
+        var maxIterations = body.Instructions.Count * 2;
+
+        while (changed && iterations < maxIterations)
+        {
+            changed = false;
+            iterations++;
+            for (var i = 0; i < body.Instructions.Count; i++)
+            {
+                if (depthAt[i] < 0) continue;
+
+                var instr = body.Instructions[i];
+                var depth = depthAt[i];
+                depth -= CalculateStackPop(instr, hasReturnValue);
+                if (depth < 0) depth = 0;
+                depth += CalculateStackPush(instr);
+                if (depth > maxDepth) maxDepth = depth;
+
+                // 分岐先にスタック深度を伝播
+                if (instr.Operand is Instruction target && instrToIdx.TryGetValue(target, out var tIdx))
+                {
+                    if (depth > depthAt[tIdx])
+                    {
+                        depthAt[tIdx] = depth;
+                        changed = true;
+                    }
+                }
+                if (instr.Operand is Instruction[] targets)
+                {
+                    foreach (var t in targets)
+                    {
+                        if (instrToIdx.TryGetValue(t, out var sIdx) && depth > depthAt[sIdx])
+                        {
+                            depthAt[sIdx] = depth;
+                            changed = true;
+                        }
+                    }
+                }
+
+                // フォールスルー
+                if (instr.OpCode.FlowControl != FlowControl.Branch
+                    && instr.OpCode.FlowControl != FlowControl.Return
+                    && instr.OpCode.FlowControl != FlowControl.Throw)
+                {
+                    if (i + 1 < body.Instructions.Count && depth > depthAt[i + 1])
+                    {
+                        depthAt[i + 1] = depth;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        return maxDepth;
+    }
+
+    private static MethodSig? GetMethodSig(Instruction instr)
+    {
+        if (instr.Operand is IMethodDefOrRef methodRef)
+            return methodRef.MethodSig;
+        if (instr.Operand is MethodSpec methodSpec)
+            return methodSpec.Method?.MethodSig;
+        return null;
+    }
+
+    private static int CalculateStackPop(Instruction instr, bool methodHasReturnValue)
+    {
+        if (instr.OpCode.Code is Code.Call or Code.Callvirt or Code.Newobj)
+        {
+            var sig = GetMethodSig(instr);
+            if (sig != null)
+            {
+                var count = sig.Params.Count;
+                if (sig.HasThis && instr.OpCode.Code != Code.Newobj)
+                    count++;
+                return count;
+            }
+            return 0;
+        }
+
+        if (instr.OpCode.Code == Code.Ret)
+            return methodHasReturnValue ? 1 : 0;
+
+        return instr.OpCode.StackBehaviourPop switch
+        {
+            StackBehaviour.Pop0 => 0,
+            StackBehaviour.Pop1 or StackBehaviour.Popi or StackBehaviour.Popref => 1,
+            StackBehaviour.Pop1_pop1 or StackBehaviour.Popi_pop1
+                or StackBehaviour.Popi_popi or StackBehaviour.Popi_popi8
+                or StackBehaviour.Popi_popr4 or StackBehaviour.Popi_popr8
+                or StackBehaviour.Popref_pop1 or StackBehaviour.Popref_popi => 2,
+            StackBehaviour.Popi_popi_popi or StackBehaviour.Popref_popi_popi
+                or StackBehaviour.Popref_popi_popi8 or StackBehaviour.Popref_popi_popr4
+                or StackBehaviour.Popref_popi_popr8 or StackBehaviour.Popref_popi_popref
+                or StackBehaviour.Popref_popi_pop1 => 3,
+            _ => 0
+        };
+    }
+
+    private static int CalculateStackPush(Instruction instr)
+    {
+        if (instr.OpCode.Code is Code.Call or Code.Callvirt)
+        {
+            var sig = GetMethodSig(instr);
+            if (sig == null) return 0;
+            return sig.RetType != null && sig.RetType.ElementType != ElementType.Void ? 1 : 0;
+        }
+
+        if (instr.OpCode.Code == Code.Newobj)
+            return 1;
+
+        return instr.OpCode.StackBehaviourPush switch
+        {
+            StackBehaviour.Push0 => 0,
+            StackBehaviour.Push1 or StackBehaviour.Pushi or StackBehaviour.Pushi8
+                or StackBehaviour.Pushr4 or StackBehaviour.Pushr8
+                or StackBehaviour.Pushref => 1,
+            StackBehaviour.Push1_push1 => 2,
+            _ => 0
+        };
     }
 }
