@@ -29,8 +29,179 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         if (sameModuleRenames.Count > 0)
             FixSameModuleMemberRefs(module, sameModuleRenames, context);
 
+        // renamePublic 対象モジュールでは virtual/abstract メソッドもグループ単位でリネーム
+        if (renamePublic)
+            RenameVirtualMethodGroups(module, context, result, sameModuleRenames);
+
         // パラメーター名の難読化（全メソッド対象、型のアクセス修飾子に関係なく安全）
         RenameParameters(module, context, result);
+    }
+
+    /// <summary>
+    /// virtual/abstract メソッドを基底定義 + 全 override でグループ化し、
+    /// グループ単位で同一の難読化名にリネームする。
+    /// </summary>
+    private static void RenameVirtualMethodGroups(
+        ModuleDef module, ObfuscationContext context, ObfuscationResult result,
+        Dictionary<(TypeDef, string), string> sameModuleRenames)
+    {
+        // 全型の継承関係を構築: TypeDef → 基底 TypeDef (モジュール内のみ)
+        var allTypes = module.GetTypes().ToList();
+        var typeByFullName = new Dictionary<string, TypeDef>();
+        foreach (var t in allTypes)
+            typeByFullName[t.FullName] = t;
+
+        // virtual メソッドをグループ化
+        // Key: (ルート TypeDef, メソッド名, シグネチャ文字列) → グループ内の全 MethodDef
+        var groups = new Dictionary<(TypeDef rootType, string name, string sig), List<MethodDef>>();
+        var processed = new HashSet<MethodDef>();
+
+        foreach (var type in allTypes)
+        {
+            foreach (var method in type.Methods)
+            {
+                if (!method.IsVirtual) continue;
+                if (method.IsConstructor) continue;
+                if (processed.Contains(method)) continue;
+                if (method.ImplMap != null || method.IsPinvokeImpl) continue;
+
+                // このメソッドの「ルート」を探す（最上位の基底定義）
+                var rootMethod = FindVirtualRoot(method, type, typeByFullName);
+                var rootType = rootMethod.DeclaringType;
+                var sigStr = rootMethod.MethodSig?.ToString() ?? "";
+                var key = (rootType, rootMethod.Name.String, sigStr);
+
+                if (!groups.TryGetValue(key, out var group))
+                {
+                    group = new List<MethodDef>();
+                    groups[key] = group;
+                }
+
+                // ルートから下に辿って全 override を収集
+                if (!processed.Contains(rootMethod))
+                {
+                    group.Add(rootMethod);
+                    processed.Add(rootMethod);
+                }
+                if (!processed.Contains(method))
+                {
+                    group.Add(method);
+                    processed.Add(method);
+                }
+            }
+        }
+
+        // 各 override を収集漏れなく追加
+        foreach (var type in allTypes)
+        {
+            foreach (var method in type.Methods)
+            {
+                if (!method.IsVirtual || method.IsConstructor) continue;
+                if (processed.Contains(method)) continue;
+                if (method.ImplMap != null || method.IsPinvokeImpl) continue;
+
+                var rootMethod = FindVirtualRoot(method, type, typeByFullName);
+                var rootType = rootMethod.DeclaringType;
+                var sigStr = rootMethod.MethodSig?.ToString() ?? "";
+                var key = (rootType, rootMethod.Name.String, sigStr);
+
+                if (groups.TryGetValue(key, out var group))
+                {
+                    group.Add(method);
+                    processed.Add(method);
+                }
+            }
+        }
+
+        // グループ単位でリネーム
+        var renamedGroups = 0;
+        foreach (var (key, group) in groups)
+        {
+            // SpecialName (get_/set_ 等) はスキップ
+            if (group.Any(m => m.IsSpecialName)) continue;
+
+            var newName = context.NameGenerator.Next();
+            foreach (var method in group)
+            {
+                var oldName = method.Name.String;
+                context.MemberRenameHistory[(method.DeclaringType, oldName)] = newName;
+                sameModuleRenames[(method.DeclaringType, oldName)] = newName;
+                context.Logger.Verbose($"virtual グループリネーム: {method.DeclaringType.Name}.{oldName} -> {newName}");
+                method.Name = newName;
+                result.RenamedSymbols++;
+            }
+            renamedGroups++;
+        }
+
+        if (renamedGroups > 0)
+            context.Logger.Info($"virtual メソッドグループリネーム: {renamedGroups} グループ");
+    }
+
+    /// <summary>
+    /// virtual メソッドの最上位の基底定義を探す。
+    /// 同一モジュール内の基底型チェーンを辿り、同名・同シグネチャのメソッドを見つける。
+    /// </summary>
+    private static MethodDef FindVirtualRoot(
+        MethodDef method, TypeDef declaringType,
+        Dictionary<string, TypeDef> typeByFullName)
+    {
+        var current = method;
+        var currentType = declaringType;
+
+        while (true)
+        {
+            var baseTypeRef = currentType.BaseType;
+            if (baseTypeRef == null) break;
+
+            var baseFullName = baseTypeRef.FullName;
+            if (!typeByFullName.TryGetValue(baseFullName, out var baseType)) break;
+
+            var baseMethod = baseType.Methods.FirstOrDefault(m =>
+                m.IsVirtual && m.Name == current.Name &&
+                new SigComparer().Equals(m.MethodSig, current.MethodSig));
+
+            if (baseMethod == null)
+            {
+                // インターフェイス実装の場合、インターフェイスも探す
+                foreach (var iface in baseType.Interfaces)
+                {
+                    var ifaceFullName = iface.Interface.FullName;
+                    if (!typeByFullName.TryGetValue(ifaceFullName, out var ifaceType)) continue;
+
+                    var ifaceMethod = ifaceType.Methods.FirstOrDefault(m =>
+                        m.IsVirtual && m.Name == current.Name &&
+                        new SigComparer().Equals(m.MethodSig, current.MethodSig));
+                    if (ifaceMethod != null)
+                    {
+                        current = ifaceMethod;
+                        currentType = ifaceType;
+                        break;
+                    }
+                }
+                break;
+            }
+
+            current = baseMethod;
+            currentType = baseType;
+        }
+
+        // 宣言型自身が実装するインターフェイスも確認
+        foreach (var iface in declaringType.Interfaces)
+        {
+            var ifaceFullName = iface.Interface.FullName;
+            if (!typeByFullName.TryGetValue(ifaceFullName, out var ifaceType)) continue;
+
+            var ifaceMethod = ifaceType.Methods.FirstOrDefault(m =>
+                m.IsVirtual && m.Name == method.Name &&
+                new SigComparer().Equals(m.MethodSig, method.MethodSig));
+            if (ifaceMethod != null && ifaceMethod != current)
+            {
+                // インターフェイスの方がより上位
+                return ifaceMethod;
+            }
+        }
+
+        return current;
     }
 
     private static void RenameParameters(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
