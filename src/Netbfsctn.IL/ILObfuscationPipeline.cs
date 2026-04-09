@@ -5,6 +5,7 @@ using dnlib.DotNet.Writer;
 using Netbfsctn.Core.Logging;
 using Netbfsctn.Core.Pipeline;
 using Netbfsctn.Core.Techniques;
+using Netbfsctn.Core.Xaml;
 using Netbfsctn.IL.Techniques;
 
 namespace Netbfsctn.IL;
@@ -48,6 +49,17 @@ public class ILObfuscationPipeline : IObfuscationPipeline
                 entries.Add((addInput, addOutput, addMixed));
             }
 
+            // WPF アセンブリ検出 (型リネーム自動スキップ用)
+            foreach (var module in modules)
+            {
+                var moduleName = module.Assembly?.Name?.String ?? "";
+                if (IsWpfAssembly(module))
+                {
+                    context.WpfModuleNames.Add(moduleName);
+                    logger.Info($"WPF アセンブリを検出: {moduleName} (BAML 互換のため型リネームを自動スキップ)");
+                }
+            }
+
             // EnableRenamePublic の除外リストを構築
             if (options.EnableRenamePublic)
             {
@@ -55,24 +67,36 @@ public class ILObfuscationPipeline : IObfuscationPipeline
                 foreach (var name in options.ExcludeRenamePublic)
                     context.ExcludeRenamePublicModules.Add(name);
 
-                // WPF自動検出: PresentationFramework を参照しているモジュールを除外
+                // WPF モジュールの public リネーム除外:
+                // --xaml-dir 指定時は XAML 解析で精密に除外するため、自動除外しない
+                // --xaml-dir 未指定時は安全のため全 public を除外 (従来動作)
+                if (options.XamlDirectories.Length == 0)
+                {
+                    foreach (var wpfName in context.WpfModuleNames)
+                        context.ExcludeRenamePublicModules.Add(wpfName);
+                }
+
                 foreach (var module in modules)
                 {
                     var moduleName = module.Assembly?.Name?.String ?? "";
-                    if (IsWpfAssembly(module))
+                    if (context.ExcludeRenamePublicModules.Contains(moduleName))
                     {
-                        context.ExcludeRenamePublicModules.Add(moduleName);
-                        logger.Info($"WPF アセンブリを検出: {moduleName} (public リネームから自動除外)");
-                    }
-                    else if (context.ExcludeRenamePublicModules.Contains(moduleName))
-                    {
-                        logger.Info($"public リネーム除外 (手動指定): {moduleName}");
+                        logger.Info($"public リネーム除外: {moduleName}");
                     }
                     else
                     {
                         logger.Info($"public リネーム対象: {moduleName}");
                     }
                 }
+            }
+
+            // ── XAML 解析: バインディング参照名を収集 ──
+            if (options.XamlDirectories.Length > 0)
+            {
+                logger.Info("XAML ソースディレクトリを解析中...");
+                context.XamlAnalysis = XamlBindingAnalyzer.Analyze(options.XamlDirectories, logger);
+                var xa = context.XamlAnalysis;
+                logger.Info($"XAML 解析完了: 型={xa.ReferencedTypes.Count}, プロパティ={xa.BoundPropertyNames.Count}, イベントハンドラ={xa.EventHandlerNames.Count}, enum値={xa.ReferencedEnumValues.Count}");
             }
 
             // ── Phase 2a: リネーム前に TypeRef → TypeDef を事前解決 ──

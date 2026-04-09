@@ -23,6 +23,12 @@ public class ObfuscationLogger
             Console.WriteLine($"  {message}");
     }
 
+    public void Warning(string message)
+    {
+        if (!_quiet)
+            Console.WriteLine($"WARNING: {message}");
+    }
+
     public void Error(string message)
     {
         Console.Error.WriteLine($"ERROR: {message}");

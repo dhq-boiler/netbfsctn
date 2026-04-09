@@ -1,5 +1,6 @@
 using Netbfsctn.Core.Logging;
 using Netbfsctn.Core.NameGeneration;
+using Netbfsctn.Core.Xaml;
 
 namespace Netbfsctn.Core.Pipeline;
 
@@ -25,4 +26,16 @@ public class ObfuscationContext
     /// EnableRenamePublic 有効時、ここに含まれないモジュールが public リネーム対象となる。
     /// </summary>
     public HashSet<string> ExcludeRenamePublicModules { get; } = new();
+
+    /// <summary>
+    /// XAML 解析結果。バインディングで参照されるプロパティ名・型名・イベントハンドラ名を保持する。
+    /// null の場合、XAML 解析は無効 (--xaml-dir 未指定)。
+    /// </summary>
+    public XamlAnalysisResult? XamlAnalysis { get; set; }
+
+    /// <summary>
+    /// WPF アセンブリとして検出されたモジュール名のセット。
+    /// WPF アセンブリでは BAML の型テーブルとの整合性のため、型名リネームを自動スキップする。
+    /// </summary>
+    public HashSet<string> WpfModuleNames { get; } = new();
 }

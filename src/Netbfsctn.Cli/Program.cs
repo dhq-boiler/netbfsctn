@@ -136,6 +136,12 @@ var additionalOutputOption = new Option<string[]>("--additional-output")
     AllowMultipleArgumentsPerToken = true
 };
 
+var xamlDirOption = new Option<string[]>("--xaml-dir")
+{
+    Description = "XAML ソースディレクトリ (バインディング解析でリネーム除外対象を自動検出)",
+    AllowMultipleArgumentsPerToken = true
+};
+
 var rootCommand = new RootCommand("netbfsctn - .NET 難読化 CLI ツール");
 rootCommand.Arguments.Add(inputArgument);
 rootCommand.Options.Add(outputOption);
@@ -163,6 +169,7 @@ rootCommand.Options.Add(virtualizeOption);
 rootCommand.Options.Add(excludeRenamePublicOption);
 rootCommand.Options.Add(additionalInputOption);
 rootCommand.Options.Add(additionalOutputOption);
+rootCommand.Options.Add(xamlDirOption);
 
 rootCommand.SetAction(parseResult =>
 {
@@ -192,6 +199,7 @@ rootCommand.SetAction(parseResult =>
     var excludeRenamePublic = parseResult.GetValue(excludeRenamePublicOption) ?? [];
     var additionalInputs = parseResult.GetValue(additionalInputOption) ?? [];
     var additionalOutputs = parseResult.GetValue(additionalOutputOption) ?? [];
+    var xamlDirs = parseResult.GetValue(xamlDirOption) ?? [];
 
     var options = new ObfuscationOptions
     {
@@ -228,7 +236,8 @@ rootCommand.SetAction(parseResult =>
         EnableResourceProtection = protectResources,
         EnableCodeVirtualization = virtualize,
         AdditionalInputPaths = additionalInputs,
-        AdditionalOutputPaths = additionalOutputs
+        AdditionalOutputPaths = additionalOutputs,
+        XamlDirectories = xamlDirs
     };
 
     return ObfuscateHandler.Execute(options);

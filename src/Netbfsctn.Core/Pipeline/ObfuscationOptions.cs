@@ -44,6 +44,9 @@ public class ObfuscationOptions
     // public リネーム除外アセンブリ名
     public string[] ExcludeRenamePublic { get; init; } = [];
 
+    // XAML ソースディレクトリ (バインディング解析用)
+    public string[] XamlDirectories { get; init; } = [];
+
     // 複数アセンブリ同時難読化
     public string[] AdditionalInputPaths { get; init; } = [];
     public string[] AdditionalOutputPaths { get; init; } = [];
