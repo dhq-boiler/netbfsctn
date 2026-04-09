@@ -120,6 +120,10 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             // SpecialName (get_/set_ 等) はスキップ
             if (group.Any(m => m.IsSpecialName)) continue;
 
+            // モジュール外インターフェイス (IDisposable, IEnumerable 等) を実装する
+            // メソッドはリネーム不可（CLRが名前でマッチングするため）
+            if (ImplementsExternalInterface(group, typeByFullName)) continue;
+
             var newName = context.NameGenerator.Next();
             foreach (var method in group)
             {
@@ -135,6 +139,68 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
 
         if (renamedGroups > 0)
             context.Logger.Info($"virtual メソッドグループリネーム: {renamedGroups} グループ");
+    }
+
+    /// <summary>
+    /// グループ内のメソッドが、モジュール外のインターフェイスを実装しているかチェックする。
+    /// IDisposable.Dispose, IEnumerable.GetEnumerator 等は名前でマッチングされるため
+    /// リネームすると実行時エラーになる。
+    /// </summary>
+    private static bool ImplementsExternalInterface(
+        List<MethodDef> group,
+        Dictionary<string, TypeDef> typeByFullName)
+    {
+        var methodName = group[0].Name.String;
+        var methodSig = group[0].MethodSig;
+
+        foreach (var method in group)
+        {
+            var type = method.DeclaringType;
+            if (type == null) continue;
+
+            // 型が実装する全インターフェイスをチェック
+            foreach (var iface in type.Interfaces)
+            {
+                var ifaceFullName = iface.Interface.FullName;
+
+                // モジュール内のインターフェイスなら OK（グループ内でまとめてリネーム可能）
+                if (typeByFullName.ContainsKey(ifaceFullName)) continue;
+
+                // モジュール外のインターフェイスに同名メソッドがあればリネーム不可
+                var ifaceTypeDef = iface.Interface.ResolveTypeDef();
+                if (ifaceTypeDef != null)
+                {
+                    if (ifaceTypeDef.Methods.Any(m =>
+                        m.Name == methodName &&
+                        new SigComparer().Equals(m.MethodSig, methodSig)))
+                        return true;
+                }
+                else
+                {
+                    // 解決できない外部インターフェイスの場合、
+                    // 安全のため名前が一般的なインターフェイスメソッドならスキップ
+                    // (Resolve 失敗 = BCLや未参照アセンブリ)
+                    return true;
+                }
+            }
+
+            // 基底型がモジュール外にある場合、基底の virtual を override している可能性
+            var baseRef = type.BaseType;
+            if (baseRef != null && !typeByFullName.ContainsKey(baseRef.FullName))
+            {
+                // モジュール外基底型の virtual メソッドを override している場合はスキップ
+                var baseTypeDef = baseRef.ResolveTypeDef();
+                if (baseTypeDef != null)
+                {
+                    if (baseTypeDef.Methods.Any(m =>
+                        m.IsVirtual && m.Name == methodName &&
+                        new SigComparer().Equals(m.MethodSig, methodSig)))
+                        return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
