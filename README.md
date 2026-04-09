@@ -44,6 +44,22 @@ netbfsctn MyApp.dll -o MyApp.obf.dll \
   --protect-resources --mapping-file map.json
 ```
 
+### Public member renaming (cross-assembly safe)
+
+```bash
+netbfsctn App.dll -o App.obf.dll \
+  --additional-input NativeLib.dll \
+  --rename-public
+```
+
+Renames public types, methods, fields, properties, and events — including virtual method groups.
+Cross-assembly references are automatically synchronized. WPF assemblies (PresentationFramework references) are auto-excluded.
+
+```bash
+# Exclude specific assemblies from public renaming
+netbfsctn App.dll --rename-public --exclude-rename-public PluginApi
+```
+
 ### Multi-assembly obfuscation
 
 ```bash
@@ -64,7 +80,7 @@ netbfsctn ./src -m source -o ./obfuscated
 
 | # | Technique | Option | Default | Description |
 |---|-----------|--------|---------|-------------|
-| 1 | Name Obfuscation | `--no-rename` to disable | Enabled | Renames types, methods, fields, and properties to confusable characters (l, I, 0, O, o) |
+| 1 | Name Obfuscation | `--no-rename` to disable | Enabled | Renames types, methods, fields, properties, and parameters to confusable characters (l, I, 0, O, o). Virtual methods/properties/events are renamed as groups to maintain dispatch integrity. |
 | 2 | String Encryption | `--no-strings` / `--encryption aes` | Enabled (XOR) | Converts plaintext strings to byte arrays + decryption helper calls |
 | 3 | Control Flow | `--no-control-flow` to disable | Enabled | Transforms methods into state machines with switch dispatchers |
 | 4 | Dead Code Insertion | `--no-dead-code` to disable | Enabled | Inserts unreachable methods and code blocks |
@@ -91,6 +107,8 @@ netbfsctn MyApp.dll --no-rename --rename-types --rename-methods
 | `--rename-fields` | Rename fields only |
 | `--rename-methods` | Rename methods only |
 | `--rename-properties` | Rename properties only |
+| `--rename-public` | Rename public members (with cross-assembly reference fixing) |
+| `--exclude-rename-public` | Exclude specific assemblies from public renaming (multiple allowed) |
 
 ## Benchmarks
 
@@ -126,6 +144,9 @@ src/
 
 tests/
 ├── Netbfsctn.Tests/                  # Unit & integration tests
+├── Netbfsctn.Tests.SampleCppCli/     # C++/CLI test library (vcxproj)
+├── Netbfsctn.Tests.CppCliHarness/    # C# harness for C++/CLI tests
+├── Netbfsctn.Tests.SampleWpfApp/     # WPF sample for obfuscation tests
 ├── Netbfsctn.Benchmark/              # Benchmark suite
 └── Netbfsctn.Benchmark.SampleApp/    # Sample app for benchmarking
 ```
@@ -151,6 +172,8 @@ Basic techniques (enabled by default):
   --rename-fields           Rename fields only
   --rename-methods          Rename methods only
   --rename-properties       Rename properties only
+  --rename-public           Rename public members (cross-assembly safe)
+  --exclude-rename-public   Exclude assemblies from public renaming
   --no-strings              Disable string encryption
   --no-control-flow         Disable control flow obfuscation
   --no-dead-code            Disable dead code insertion
