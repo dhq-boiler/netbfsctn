@@ -112,26 +112,26 @@ netbfsctn MyApp.dll --no-rename --rename-types --rename-methods
 
 ## Benchmarks
 
-Results for a sample app (15.5 KB, 51 methods, 89 types, 70 plaintext strings):
+Results for a sample app (18.5 KB, 143 types, 91 plaintext strings):
 
 | Configuration | Size | Size Increase | Runtime Overhead | Plaintext Strings | Avg IL/Method | Correct |
 |--------------|------|--------------|-----------------|-------------------|---------------|---------|
-| Baseline | 15.5 KB | — | — | 70 | 21.3 | OK |
-| Rename Only | 15.5 KB | ±0% | +1.0% | 70 | 21.3 | OK |
-| Strings Only | 26.5 KB | +71.0% | +2.4% | 0 | 161.7 | OK |
-| ControlFlow Only | 15.5 KB | ±0% | +1.1% | 70 | 24.9 | OK |
-| DeadCode Only | 16.0 KB | +3.2% | +1.7% | 70 | 27.1 | OK |
-| **Default (4 basic)** | **29.0 KB** | **+87.1%** | **+5.0%** | **0** | **146.0** | **OK** |
-| + Anti-ILDASM | 29.0 KB | +87.1% | -4.2% | 0 | 143.8 | OK |
-| + Anti-Debug | 29.5 KB | +90.3% | -3.5% | 0 | 145.5 | OK |
-| + Anti-Tamper | 29.5 KB | +90.3% | +2.6% | 1 | 141.9 | OK |
-| + NecroBit | 43.0 KB | +177.4% | +1.0% | 1 | 21.7 | OK |
-| + HideCalls | 52.5 KB | +238.7% | +2.2% | 0 | 339.7 | OK |
-| + Resources | 29.5 KB | +90.3% | +2.9% | 0 | 144.4 | OK |
-| + Virtualize | 38.0 KB | +145.2% | +2.7% | 22 | 142.3 | OK |
-| **Full Protection** | **56.0 KB** | **+261.3%** | **+3.6%** | **3** | **69.7** | **OK** |
+| Baseline | 18.5 KB | — | — | 91 | 18.6 | OK |
+| Rename Only | 20.0 KB | +8.1% | -2.3% | 91 | 18.6 | OK |
+| Strings Only | 33.5 KB | +81.1% | -1.2% | 0 | 137.6 | OK |
+| ControlFlow Only | 18.5 KB | ±0% | +3.5% | 91 | 19.4 | OK |
+| DeadCode Only | 21.5 KB | +16.2% | +3.3% | 91 | 27.1 | OK |
+| **Default (4 basic)** | **38.5 KB** | **+108.1%** | **+2.4%** | **0** | **123.2** | **OK** |
+| + Anti-ILDASM | 38.5 KB | +108.1% | +0.1% | 0 | 122.0 | OK |
+| + Anti-Debug | 39.0 KB | +110.8% | -2.3% | 0 | 123.4 | OK |
+| + Anti-Tamper | 39.0 KB | +110.8% | -1.1% | 1 | 121.0 | OK |
+| + NecroBit | 53.5 KB | +189.2% | -2.4% | 1 | 42.8 | OK |
+| + HideCalls | 64.0 KB | +245.9% | +2.8% | 0 | 258.7 | OK |
+| + Resources | 39.0 KB | +110.8% | +2.3% | 0 | 122.4 | OK |
+| + Virtualize | 46.0 KB | +148.6% | +9.3% | 17 | 109.3 | OK |
+| **Full Protection** | **69.5 KB** | **+275.7%** | **+4.4%** | **4** | **84.5** | **OK** |
 
-> All configurations pass correctness verification. Full protection adds only +261% size and +3.6% runtime overhead.
+> All configurations pass correctness verification. Full protection adds +276% size and +4.4% runtime overhead.
 
 ## Project Structure
 
