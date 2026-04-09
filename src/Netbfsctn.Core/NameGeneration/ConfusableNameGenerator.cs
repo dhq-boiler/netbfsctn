@@ -2,11 +2,12 @@ namespace Netbfsctn.Core.NameGeneration;
 
 public class ConfusableNameGenerator
 {
+    // 視覚的に紛らわしい文字（l/I/O/0/o）
     private static readonly char[] ConfusableChars = ['l', 'I', 'O', '0', 'o'];
 
     private readonly Random _random;
     private readonly HashSet<string> _generated = new();
-    private int _minLength = 4;
+    private int _minAlphaCount = 3;
 
     public ConfusableNameGenerator(int? seed = null)
     {
@@ -22,42 +23,49 @@ public class ConfusableNameGenerator
                 return name;
         }
 
-        // 衝突が多い場合は長さを増やす
-        _minLength++;
+        // 衝突が多い場合はアルファベット文字数を増やす
+        _minAlphaCount++;
         return Next();
     }
 
+    /// <summary>
+    /// アンダースコアの海にアルファベットが散在する名前を生成する。
+    /// 各アルファベット文字の間に 2〜6 個のアンダースコアを挟み、
+    /// その数を微妙にずらすことで、人間には「ほぼ同じに見える」が
+    /// 実際には異なる名前を大量に生成する。
+    ///
+    /// 例: ___o__O______0___I, ____o__O_____0____I, ___o___O______0___I
+    /// </summary>
     private string GenerateCandidate()
     {
-        // 先頭にランダムな長さ（0〜10個）のアンダースコアを付加
-        var prefixLen = _random.Next(11);
-        var bodyLen = _minLength + _random.Next(3);
+        var alphaCount = _minAlphaCount + _random.Next(3);
+        var chars = new List<char>();
 
-        var parts = new List<char>();
+        // 先頭アンダースコア (1〜6個)
+        AppendUnderscores(chars, 1 + _random.Next(6));
 
-        // アンダースコアプレフィックス
-        for (var i = 0; i < prefixLen; i++)
-            parts.Add('_');
+        // 最初のアルファベット文字 (数字以外)
+        chars.Add(PickNonDigit());
 
-        // 本体の最初の文字は数字以外にする
-        parts.Add(PickNonDigit());
-
-        // 残りの本体文字を生成（途中にアンダースコアをランダム挿入）
-        for (var i = 1; i < bodyLen; i++)
+        // 残りのアルファベット文字 (間にアンダースコア)
+        for (var i = 1; i < alphaCount; i++)
         {
-            // 約25%の確率でアンダースコア連続を挿入
-            if (_random.Next(4) == 0)
-            {
-                // 3〜8個の連続アンダースコア
-                var runLen = 3 + _random.Next(6);
-                for (var j = 0; j < runLen; j++)
-                    parts.Add('_');
-            }
-
-            parts.Add(ConfusableChars[_random.Next(ConfusableChars.Length)]);
+            // 各文字間にアンダースコア (2〜6個)
+            AppendUnderscores(chars, 2 + _random.Next(5));
+            chars.Add(ConfusableChars[_random.Next(ConfusableChars.Length)]);
         }
 
-        return new string(parts.ToArray());
+        // 末尾アンダースコア (0〜3個, 50%の確率で付与)
+        if (_random.Next(2) == 0)
+            AppendUnderscores(chars, 1 + _random.Next(3));
+
+        return new string(chars.ToArray());
+    }
+
+    private static void AppendUnderscores(List<char> chars, int count)
+    {
+        for (var i = 0; i < count; i++)
+            chars.Add('_');
     }
 
     private char PickNonDigit()
