@@ -29,9 +29,13 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         if (sameModuleRenames.Count > 0)
             FixSameModuleMemberRefs(module, sameModuleRenames, context);
 
-        // renamePublic 対象モジュールでは virtual/abstract メソッドもグループ単位でリネーム
+        // renamePublic 対象モジュールでは virtual/abstract もグループ単位でリネーム
         if (renamePublic)
+        {
             RenameVirtualMethodGroups(module, context, result, sameModuleRenames);
+            RenameVirtualPropertyGroups(module, context, result, sameModuleRenames);
+            RenameVirtualEventGroups(module, context, result, sameModuleRenames);
+        }
 
         // パラメーター名の難読化（全メソッド対象、型のアクセス修飾子に関係なく安全）
         RenameParameters(module, context, result);
@@ -271,6 +275,240 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         }
 
         return current;
+    }
+
+    /// <summary>
+    /// virtual プロパティをインターフェイス定義 + 全実装でグループ化してリネームする。
+    /// </summary>
+    private static void RenameVirtualPropertyGroups(
+        ModuleDef module, ObfuscationContext context, ObfuscationResult result,
+        Dictionary<(TypeDef, string), string> sameModuleRenames)
+    {
+        var allTypes = module.GetTypes().ToList();
+        var typeByFullName = new Dictionary<string, TypeDef>();
+        foreach (var t in allTypes)
+            typeByFullName[t.FullName] = t;
+
+        // プロパティをグループ化: (インターフェイス型, プロパティ名) → List<(TypeDef, PropertyDef)>
+        var groups = new Dictionary<(TypeDef, string), List<(TypeDef type, PropertyDef prop)>>();
+
+        foreach (var type in allTypes)
+        {
+            foreach (var prop in type.Properties)
+            {
+                var getter = prop.GetMethod;
+                var setter = prop.SetMethod;
+                var isVirtual = (getter?.IsVirtual == true) || (setter?.IsVirtual == true);
+                if (!isVirtual) continue;
+
+                // インターフェイスのルートを探す
+                var rootType = FindPropertyInterfaceRoot(type, prop.Name, typeByFullName);
+                if (rootType == null) continue;
+
+                var key = (rootType, prop.Name.String);
+                if (!groups.TryGetValue(key, out var group))
+                {
+                    group = new List<(TypeDef, PropertyDef)>();
+                    groups[key] = group;
+                }
+                group.Add((type, prop));
+            }
+        }
+
+        var renamedGroups = 0;
+        foreach (var (key, group) in groups)
+        {
+            var (rootType, _) = key;
+            // ルートがモジュール外ならスキップ
+            if (!typeByFullName.ContainsKey(rootType.FullName)) continue;
+
+            // 外部インターフェイス/基底型チェック
+            if (group.Any(g => HasExternalVirtualProperty(g.type, g.prop.Name, typeByFullName)))
+                continue;
+
+            var newName = context.NameGenerator.Next();
+            foreach (var (type, prop) in group)
+            {
+                context.Logger.Verbose($"virtual プロパティリネーム: {type.Name}.{prop.Name} -> {newName}");
+                prop.Name = newName;
+                result.RenamedSymbols++;
+
+                if (prop.GetMethod != null)
+                {
+                    var oldName = prop.GetMethod.Name.String;
+                    var getterName = "get_" + newName;
+                    context.MemberRenameHistory[(type, oldName)] = getterName;
+                    sameModuleRenames[(type, oldName)] = getterName;
+                    prop.GetMethod.Name = getterName;
+                }
+                if (prop.SetMethod != null)
+                {
+                    var oldName = prop.SetMethod.Name.String;
+                    var setterName = "set_" + newName;
+                    context.MemberRenameHistory[(type, oldName)] = setterName;
+                    sameModuleRenames[(type, oldName)] = setterName;
+                    prop.SetMethod.Name = setterName;
+                }
+            }
+            renamedGroups++;
+        }
+
+        if (renamedGroups > 0)
+            context.Logger.Info($"virtual プロパティグループリネーム: {renamedGroups} グループ");
+    }
+
+    /// <summary>
+    /// virtual イベントをインターフェイス定義 + 全実装でグループ化してリネームする。
+    /// </summary>
+    private static void RenameVirtualEventGroups(
+        ModuleDef module, ObfuscationContext context, ObfuscationResult result,
+        Dictionary<(TypeDef, string), string> sameModuleRenames)
+    {
+        var allTypes = module.GetTypes().ToList();
+        var typeByFullName = new Dictionary<string, TypeDef>();
+        foreach (var t in allTypes)
+            typeByFullName[t.FullName] = t;
+
+        var groups = new Dictionary<(TypeDef, string), List<(TypeDef type, EventDef evt)>>();
+
+        foreach (var type in allTypes)
+        {
+            foreach (var evt in type.Events)
+            {
+                var isVirtual = (evt.AddMethod?.IsVirtual == true) || (evt.RemoveMethod?.IsVirtual == true);
+                if (!isVirtual) continue;
+
+                var rootType = FindEventInterfaceRoot(type, evt.Name, typeByFullName);
+                if (rootType == null) continue;
+
+                var key = (rootType, evt.Name.String);
+                if (!groups.TryGetValue(key, out var group))
+                {
+                    group = new List<(TypeDef, EventDef)>();
+                    groups[key] = group;
+                }
+                group.Add((type, evt));
+            }
+        }
+
+        var renamedGroups = 0;
+        foreach (var (key, group) in groups)
+        {
+            var (rootType, _) = key;
+            if (!typeByFullName.ContainsKey(rootType.FullName)) continue;
+
+            if (group.Any(g => HasExternalVirtualEvent(g.type, g.evt.Name, typeByFullName)))
+                continue;
+
+            var newName = context.NameGenerator.Next();
+            foreach (var (type, evt) in group)
+            {
+                context.Logger.Verbose($"virtual イベントリネーム: {type.Name}.{evt.Name} -> {newName}");
+                evt.Name = newName;
+                result.RenamedSymbols++;
+
+                if (evt.AddMethod != null)
+                {
+                    var oldName = evt.AddMethod.Name.String;
+                    var addName = "add_" + newName;
+                    context.MemberRenameHistory[(type, oldName)] = addName;
+                    sameModuleRenames[(type, oldName)] = addName;
+                    evt.AddMethod.Name = addName;
+                }
+                if (evt.RemoveMethod != null)
+                {
+                    var oldName = evt.RemoveMethod.Name.String;
+                    var removeName = "remove_" + newName;
+                    context.MemberRenameHistory[(type, oldName)] = removeName;
+                    sameModuleRenames[(type, oldName)] = removeName;
+                    evt.RemoveMethod.Name = removeName;
+                }
+                if (evt.InvokeMethod != null)
+                {
+                    var oldName = evt.InvokeMethod.Name.String;
+                    var raiseName = "raise_" + newName;
+                    context.MemberRenameHistory[(type, oldName)] = raiseName;
+                    sameModuleRenames[(type, oldName)] = raiseName;
+                    evt.InvokeMethod.Name = raiseName;
+                }
+            }
+            renamedGroups++;
+        }
+
+        if (renamedGroups > 0)
+            context.Logger.Info($"virtual イベントグループリネーム: {renamedGroups} グループ");
+    }
+
+    private static TypeDef? FindPropertyInterfaceRoot(TypeDef type, UTF8String propName, Dictionary<string, TypeDef> typeByFullName)
+    {
+        // 型自身がインターフェイスならそれがルート
+        if (type.IsInterface) return type;
+
+        // 実装するモジュール内インターフェイスに同名プロパティがあるか
+        foreach (var iface in type.Interfaces)
+        {
+            if (!typeByFullName.TryGetValue(iface.Interface.FullName, out var ifaceType)) continue;
+            if (ifaceType.Properties.Any(p => p.Name == propName))
+                return ifaceType;
+        }
+
+        // 基底型を辿る
+        if (type.BaseType != null && typeByFullName.TryGetValue(type.BaseType.FullName, out var baseType))
+            return FindPropertyInterfaceRoot(baseType, propName, typeByFullName);
+
+        return type; // ルートが見つからなければ自分自身
+    }
+
+    private static TypeDef? FindEventInterfaceRoot(TypeDef type, UTF8String evtName, Dictionary<string, TypeDef> typeByFullName)
+    {
+        if (type.IsInterface) return type;
+
+        foreach (var iface in type.Interfaces)
+        {
+            if (!typeByFullName.TryGetValue(iface.Interface.FullName, out var ifaceType)) continue;
+            if (ifaceType.Events.Any(e => e.Name == evtName))
+                return ifaceType;
+        }
+
+        if (type.BaseType != null && typeByFullName.TryGetValue(type.BaseType.FullName, out var baseType))
+            return FindEventInterfaceRoot(baseType, evtName, typeByFullName);
+
+        return type;
+    }
+
+    private static bool HasExternalVirtualProperty(TypeDef type, UTF8String propName, Dictionary<string, TypeDef> typeByFullName)
+    {
+        foreach (var iface in type.Interfaces)
+        {
+            if (typeByFullName.ContainsKey(iface.Interface.FullName)) continue;
+            // 外部インターフェイスに同名プロパティがあればスキップ
+            var ifaceTypeDef = iface.Interface.ResolveTypeDef();
+            if (ifaceTypeDef == null) return true; // 解決不能 → 安全のためスキップ
+            if (ifaceTypeDef.Properties.Any(p => p.Name == propName)) return true;
+        }
+        if (type.BaseType != null && !typeByFullName.ContainsKey(type.BaseType.FullName))
+        {
+            var baseTypeDef = type.BaseType.ResolveTypeDef();
+            if (baseTypeDef?.Properties.Any(p => p.Name == propName) == true) return true;
+        }
+        return false;
+    }
+
+    private static bool HasExternalVirtualEvent(TypeDef type, UTF8String evtName, Dictionary<string, TypeDef> typeByFullName)
+    {
+        foreach (var iface in type.Interfaces)
+        {
+            if (typeByFullName.ContainsKey(iface.Interface.FullName)) continue;
+            var ifaceTypeDef = iface.Interface.ResolveTypeDef();
+            if (ifaceTypeDef == null) return true;
+            if (ifaceTypeDef.Events.Any(e => e.Name == evtName)) return true;
+        }
+        if (type.BaseType != null && !typeByFullName.ContainsKey(type.BaseType.FullName))
+        {
+            var baseTypeDef = type.BaseType.ResolveTypeDef();
+            if (baseTypeDef?.Events.Any(e => e.Name == evtName) == true) return true;
+        }
+        return false;
     }
 
     private static void RenameParameters(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
