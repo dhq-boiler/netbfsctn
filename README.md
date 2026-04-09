@@ -53,12 +53,32 @@ netbfsctn App.dll -o App.obf.dll \
 ```
 
 Renames public types, methods, fields, properties, and events — including virtual method groups.
-Cross-assembly references are automatically synchronized. WPF assemblies (PresentationFramework references) are auto-excluded.
+Cross-assembly references are automatically synchronized.
 
 ```bash
 # Exclude specific assemblies from public renaming
 netbfsctn App.dll --rename-public --exclude-rename-public PluginApi
 ```
+
+### WPF application support
+
+```bash
+netbfsctn App.dll --rename-public --xaml-dir ./MyWpfProject
+```
+
+`--xaml-dir` analyzes XAML source files to auto-detect names that must be preserved:
+
+| Protected | Detection |
+|-----------|-----------|
+| Binding target properties | `{Binding Path=...}` |
+| Event handler methods | Plain identifier attribute values |
+| Enum values used in XAML | Attribute values (e.g. `Visibility="Collapsed"`) |
+| XAML-referenced types | `x:Type`, `x:Class`, `DataType`, `TargetType`, element names |
+| `x:Static` members | `{x:Static prefix:Type.Member}` |
+
+WPF assemblies (detected via PresentationFramework reference) additionally skip:
+- **Type renaming** — BAML stores an internal type table that cannot be fully reconstructed from XAML source analysis
+- **Property renaming** — BAML references properties by name for attribute setting
 
 ### Multi-assembly obfuscation
 
@@ -186,6 +206,9 @@ Advanced techniques (opt-in):
   --hide-calls              Replace method calls with reflection
   --virtualize              Convert methods to custom VM bytecode
   --protect-resources       Encrypt embedded resources
+
+WPF / XAML:
+  --xaml-dir                XAML source directories for binding analysis (multiple allowed)
 
 Multi-assembly:
   --additional-input        Additional input assembly paths (multiple allowed)
