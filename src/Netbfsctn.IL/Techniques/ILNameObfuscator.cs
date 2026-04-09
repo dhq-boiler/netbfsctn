@@ -1,6 +1,7 @@
 using dnlib.DotNet;
 using Netbfsctn.Core.Pipeline;
 using Netbfsctn.Core.Techniques;
+using Netbfsctn.Core.Xaml;
 
 namespace Netbfsctn.IL.Techniques;
 
@@ -14,6 +15,11 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         var renamePublic = context.Options.EnableRenamePublic
             && !context.ExcludeRenamePublicModules.Contains(assemblyName);
 
+        // ジェネリック型引数として使用されている型を収集 (DI登録、BAML参照等で必要)
+        var genericArgTypes = CollectGenericTypeArguments(module);
+        if (genericArgTypes.Count > 0)
+            context.Logger.Info($"ジェネリック型引数として参照される型: {genericArgTypes.Count} 件 (リネーム除外)");
+
         // 同一モジュール内 MemberRef (Class=TypeDef) 修正用マップ
         var sameModuleRenames = new Dictionary<(TypeDef type, string oldName), string>();
 
@@ -22,7 +28,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             if (type.Name == "<Module>")
                 continue;
 
-            ProcessType(type, context, result, renamePublic, sameModuleRenames);
+            ProcessType(type, context, result, renamePublic, sameModuleRenames, genericArgTypes);
         }
 
         // 同一モジュール内 MemberRef の修正
@@ -122,6 +128,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         MergeImplicitInterfaceGroups(allTypes, groups, typeByFullName);
 
         // グループ単位でリネーム
+        var xaml = context.XamlAnalysis;
         var renamedGroups = 0;
         foreach (var (key, group) in groups)
         {
@@ -134,6 +141,13 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             // モジュール外インターフェイス (IDisposable, IEnumerable 等) を実装する
             // メソッドはリネーム不可（CLRが名前でマッチングするため）
             if (ImplementsExternalInterface(group, typeByFullName)) continue;
+
+            // XAML イベントハンドラとして参照されるメソッドはスキップ
+            if (xaml != null && group.Any(m => xaml.EventHandlerNames.Contains(m.Name.String)))
+            {
+                context.Logger.Verbose($"XAML イベントハンドラのため virtual グループスキップ: {key.name}");
+                continue;
+            }
 
             var newName = context.NameGenerator.Next();
             foreach (var method in group)
@@ -493,6 +507,11 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         ModuleDef module, ObfuscationContext context, ObfuscationResult result,
         Dictionary<(TypeDef, string), string> sameModuleRenames)
     {
+        // WPF アセンブリのプロパティは BAML が名前で参照するためリネーム不可
+        var moduleName = module.Assembly?.Name?.String ?? "";
+        if (context.WpfModuleNames.Contains(moduleName))
+            return;
+
         var allTypes = module.GetTypes().ToList();
         var typeByFullName = new Dictionary<string, TypeDef>();
         foreach (var t in allTypes)
@@ -524,6 +543,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             }
         }
 
+        var xamlProps = context.XamlAnalysis;
         var renamedGroups = 0;
         foreach (var (key, group) in groups)
         {
@@ -534,6 +554,13 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             // 外部インターフェイス/基底型チェック
             if (group.Any(g => HasExternalVirtualProperty(g.type, g.prop.Name, typeByFullName)))
                 continue;
+
+            // XAML バインディングで参照されるプロパティはスキップ
+            if (xamlProps != null && group.Any(g => xamlProps.BoundPropertyNames.Contains(g.prop.Name.String)))
+            {
+                context.Logger.Verbose($"XAML バインディング対象のため virtual プロパティグループスキップ: {key.Item2}");
+                continue;
+            }
 
             var newName = context.NameGenerator.Next();
             foreach (var (type, prop) in group)
@@ -814,17 +841,22 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
     }
 
     private void ProcessType(TypeDef type, ObfuscationContext context, ObfuscationResult result,
-        bool renamePublic, Dictionary<(TypeDef, string), string> sameModuleRenames)
+        bool renamePublic, Dictionary<(TypeDef, string), string> sameModuleRenames,
+        HashSet<string> genericArgTypes)
     {
         var options = context.Options;
+        var xaml = context.XamlAnalysis;
+
+        var isWpfModule = context.WpfModuleNames.Contains(type.Module?.Assembly?.Name?.String ?? "");
 
         var enableRenameTypes = renamePublic || options.EnableRenameTypes;
         var enableRenameFields = renamePublic || options.EnableRenameFields;
         var enableRenameMethods = renamePublic || options.EnableRenameMethods;
-        var enableRenameProperties = renamePublic || options.EnableRenameProperties;
+        // WPF アセンブリのプロパティは BAML が名前で参照するためリネーム不可
+        var enableRenameProperties = !isWpfModule && (renamePublic || options.EnableRenameProperties);
 
         foreach (var nested in type.NestedTypes)
-            ProcessType(nested, context, result, renamePublic, sameModuleRenames);
+            ProcessType(nested, context, result, renamePublic, sameModuleRenames, genericArgTypes);
 
         if ((type.IsPublic || type.IsNestedPublic) && !renamePublic)
             return;
@@ -839,6 +871,13 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             {
                 if (field.IsPublic && !renamePublic)
                     continue;
+
+                // XAML で参照される enum フィールドはスキップ (BAML が文字列で保存するため)
+                if (type.IsEnum && xaml?.ReferencedEnumValues.Contains(field.Name.String) == true)
+                {
+                    context.Logger.Verbose($"XAML 参照 enum 値のためスキップ: {type.Name}.{field.Name}");
+                    continue;
+                }
 
                 var oldName = field.Name.String;
                 var newName = context.NameGenerator.Next();
@@ -861,6 +900,22 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                     continue;
 
                 var oldName = method.Name.String;
+
+                // XAML イベントハンドラとして参照されるメソッドはスキップ
+                if (xaml?.EventHandlerNames.Contains(oldName) == true)
+                {
+                    context.Logger.Verbose($"XAML イベントハンドラのためスキップ: {type.Name}.{oldName}");
+                    continue;
+                }
+
+                // 外部インターフェースの暗黙的実装メソッドはスキップ
+                // (構造体や sealed クラスは IsVirtual=false だが、CLR が名前でマッチングするため)
+                if (IsImplicitExternalInterfaceMethod(type, method))
+                {
+                    context.Logger.Verbose($"外部インターフェース実装のためスキップ: {type.Name}.{oldName}");
+                    continue;
+                }
+
                 var newName = context.NameGenerator.Next();
                 context.NameMap[method.FullName] = newName;
                 context.MemberRenameHistory[(type, oldName, method.MethodSig?.Params?.Count ?? 0)] = newName;
@@ -884,6 +939,13 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 // virtual プロパティはグループリネームに任せる
                 if (property.GetMethod?.IsVirtual == true || property.SetMethod?.IsVirtual == true)
                     continue;
+
+                // XAML バインディングで参照されるプロパティはスキップ
+                if (xaml?.BoundPropertyNames.Contains(property.Name.String) == true)
+                {
+                    context.Logger.Verbose($"XAML バインディング対象のためスキップ: {type.Name}.{property.Name}");
+                    continue;
+                }
 
                 var newName = context.NameGenerator.Next();
                 context.Logger.Verbose($"プロパティ: {property.Name} -> {newName}");
@@ -963,11 +1025,30 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         // 型自体の名前変更
         if (enableRenameTypes)
         {
-            var newTypeName = context.NameGenerator.Next();
-            context.NameMap[type.FullName] = newTypeName;
-            context.Logger.Verbose($"型: {type.Name} -> {newTypeName}");
-            type.Name = newTypeName;
-            result.RenamedSymbols++;
+            // WPF アセンブリの型は BAML 型テーブルとの整合性のためスキップ
+            if (isWpfModule)
+            {
+                context.Logger.Verbose($"WPF BAML 互換のため型リネームスキップ: {type.FullName}");
+            }
+            // XAML から参照される型はスキップ
+            else if (xaml?.ReferencedTypes.Contains(type.FullName) == true)
+            {
+                context.Logger.Verbose($"XAML 参照型のためスキップ: {type.FullName}");
+            }
+            // ジェネリック型引数として使用される型はスキップ
+            // (DI登録、リフレクション等で名前解決される可能性があるため)
+            else if (genericArgTypes.Contains(type.FullName))
+            {
+                context.Logger.Verbose($"ジェネリック型引数のためスキップ: {type.FullName}");
+            }
+            else
+            {
+                var newTypeName = context.NameGenerator.Next();
+                context.NameMap[type.FullName] = newTypeName;
+                context.Logger.Verbose($"型: {type.Name} -> {newTypeName}");
+                type.Name = newTypeName;
+                result.RenamedSymbols++;
+            }
         }
     }
 
@@ -1015,6 +1096,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             var resolved = iface.Interface.ResolveTypeDef();
             if (resolved == null)
             {
+                // 解決不能な外部インターフェイス → 既知のメソッド名ならスキップ
                 if (IsWellKnownRuntimeMethodName(methodName))
                     return true;
                 continue;
@@ -1023,6 +1105,8 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             // モジュール内インターフェースはスキップ (virtual グループリネームで処理される)
             if (resolved.Module == type.Module) continue;
 
+            // 外部インターフェースに同名メソッドがあればスキップ
+            // (ジェネリック型パラメータのためシグネチャ比較ではなく名前で照合)
             if (resolved.Methods.Any(m => m.Name == methodName))
                 return true;
         }
@@ -1052,6 +1136,72 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// モジュール内の全ジェネリック型引数として使用されている型のフルネームを収集する。
+    /// メソッド呼び出しの型パラメータ (e.g. container.Register&lt;IService, MyImpl&gt;()) や
+    /// クラス定義の型パラメータ (e.g. class MyVM : Base&lt;MyModel&gt;) から抽出する。
+    /// </summary>
+    private static HashSet<string> CollectGenericTypeArguments(ModuleDef module)
+    {
+        var result = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var type in module.GetTypes())
+        {
+            // 基底型のジェネリック引数 (e.g. class MyVM : ViewModelBase<MyModel>)
+            CollectFromTypeSig(type.BaseType?.ToTypeSig(), result);
+
+            // インターフェース実装のジェネリック引数 (e.g. : IEquatable<MyType>)
+            foreach (var iface in type.Interfaces)
+                CollectFromTypeSig(iface.Interface.ToTypeSig(), result);
+
+            foreach (var method in type.Methods)
+            {
+                if (!method.HasBody) continue;
+
+                foreach (var instr in method.Body.Instructions)
+                {
+                    // ジェネリックメソッド呼び出し (e.g. Register<IService, MyImpl>())
+                    if (instr.Operand is MethodSpec ms && ms.GenericInstMethodSig != null)
+                    {
+                        foreach (var arg in ms.GenericInstMethodSig.GenericArguments)
+                            CollectFromTypeSig(arg, result);
+                    }
+
+                    // ジェネリック型のインスタンス化/参照
+                    if (instr.Operand is TypeSpec ts)
+                        CollectFromTypeSig(ts.TypeSig, result);
+
+                    // ジェネリック型上のメンバー参照
+                    if (instr.Operand is MemberRef mr && mr.Class is TypeSpec mrTs)
+                        CollectFromTypeSig(mrTs.TypeSig, result);
+                }
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// TypeSig からジェネリック型引数の具象型名を再帰的に抽出する。
+    /// </summary>
+    private static void CollectFromTypeSig(TypeSig? sig, HashSet<string> result)
+    {
+        if (sig is not GenericInstSig genSig) return;
+
+        foreach (var arg in genSig.GenericArguments)
+        {
+            var leaf = arg;
+            while (leaf is ModifierSig modSig)
+                leaf = modSig.Next;
+
+            if (leaf is ClassOrValueTypeSig cvSig && cvSig.TypeDefOrRef != null)
+                result.Add(cvSig.TypeDefOrRef.FullName);
+
+            // ネストされたジェネリクス (e.g. Dict<string, List<MyType>>)
+            CollectFromTypeSig(arg, result);
+        }
     }
 
     private static bool IsCompilerGenerated(TypeDef type)
