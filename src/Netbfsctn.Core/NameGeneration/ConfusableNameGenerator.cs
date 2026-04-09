@@ -9,6 +9,12 @@ public class ConfusableNameGenerator
     private readonly HashSet<string> _generated = new();
     private int _minAlphaCount = 3;
 
+    /// <summary>
+    /// アルファベットパターンのテンプレートプール。
+    /// 同じ文字列パターンを使い回し、アンダースコアの数だけで区別させる。
+    /// </summary>
+    private readonly List<char[]> _alphaPatterns = new();
+
     public ConfusableNameGenerator(int? seed = null)
     {
         _random = seed.HasValue ? new Random(seed.Value) : new Random();
@@ -23,36 +29,38 @@ public class ConfusableNameGenerator
                 return name;
         }
 
-        // 衝突が多い場合はアルファベット文字数を増やす
         _minAlphaCount++;
         return Next();
     }
 
     /// <summary>
-    /// アンダースコアの海にアルファベットが散在する名前を生成する。
-    /// 各アルファベット文字の間に 2〜6 個のアンダースコアを挟み、
-    /// その数を微妙にずらすことで、人間には「ほぼ同じに見える」が
-    /// 実際には異なる名前を大量に生成する。
+    /// アルファベットの並びは少数のパターンを使い回し、
+    /// アンダースコアの数だけを微妙にずらすことで名前を生成する。
+    /// 人間にはアルファベット部分が同じに見えるため、
+    /// 「全部同じ名前に見える」状態を作り出す。
     ///
-    /// 例: ___o__O______0___I, ____o__O_____0____I, ___o___O______0___I
+    /// 例: __o___I__l___O, ___o__I___l__O, __o____I__l__O
     /// </summary>
     private string GenerateCandidate()
     {
         var alphaCount = _minAlphaCount + _random.Next(3);
+
+        // アルファベットパターンを取得（同じ文字数のパターンを再利用）
+        var pattern = GetOrCreateAlphaPattern(alphaCount);
+
         var chars = new List<char>();
 
         // 先頭アンダースコア (1〜6個)
         AppendUnderscores(chars, 1 + _random.Next(6));
 
-        // 最初のアルファベット文字 (数字以外)
-        chars.Add(PickNonDigit());
+        // 最初のアルファベット文字
+        chars.Add(pattern[0]);
 
-        // 残りのアルファベット文字 (間にアンダースコア)
+        // 残りのアルファベット文字 (間にアンダースコア 2〜6個)
         for (var i = 1; i < alphaCount; i++)
         {
-            // 各文字間にアンダースコア (2〜6個)
             AppendUnderscores(chars, 2 + _random.Next(5));
-            chars.Add(ConfusableChars[_random.Next(ConfusableChars.Length)]);
+            chars.Add(pattern[i]);
         }
 
         // 末尾アンダースコア (0〜3個, 50%の確率で付与)
@@ -60,6 +68,35 @@ public class ConfusableNameGenerator
             AppendUnderscores(chars, 1 + _random.Next(3));
 
         return new string(chars.ToArray());
+    }
+
+    /// <summary>
+    /// 指定文字数のアルファベットパターンを取得する。
+    /// 同じ文字数に対して少数のパターン（最大3つ）を使い回す。
+    /// </summary>
+    private char[] GetOrCreateAlphaPattern(int length)
+    {
+        // 同じ長さのパターンを探す
+        var candidates = new List<char[]>();
+        foreach (var p in _alphaPatterns)
+        {
+            if (p.Length == length)
+                candidates.Add(p);
+        }
+
+        // パターンが3つ未満なら80%の確率で新規作成
+        if (candidates.Count < 3 && (candidates.Count == 0 || _random.Next(5) < 4))
+        {
+            var pattern = new char[length];
+            pattern[0] = PickNonDigit();
+            for (var i = 1; i < length; i++)
+                pattern[i] = ConfusableChars[_random.Next(ConfusableChars.Length)];
+            _alphaPatterns.Add(pattern);
+            return pattern;
+        }
+
+        // 既存パターンからランダムに選択
+        return candidates[_random.Next(candidates.Count)];
     }
 
     private static void AppendUnderscores(List<char> chars, int count)
