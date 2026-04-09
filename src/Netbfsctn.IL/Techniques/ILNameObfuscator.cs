@@ -116,6 +116,11 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             }
         }
 
+        // C++/CLI の暗黙的インターフェイス実装を統合する。
+        // newslot virtual メソッドはインターフェイスメソッドと別グループになるが、
+        // CLR は名前+シグネチャで暗黙マッチングするため、同一グループに統合する必要がある。
+        MergeImplicitInterfaceGroups(allTypes, groups, typeByFullName);
+
         // グループ単位でリネーム
         var renamedGroups = 0;
         foreach (var (key, group) in groups)
@@ -180,6 +185,92 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
     /// IDisposable.Dispose, IEnumerable.GetEnumerator 等は名前でマッチングされるため
     /// リネームすると実行時エラーになる。
     /// </summary>
+    /// <summary>
+    /// C++/CLI の暗黙的インターフェイス実装パターンを統合する。
+    /// 型がインターフェイスを実装する場合、同名+同シグネチャのメソッドが
+    /// インターフェイスグループと実装グループに別々に存在する場合がある。
+    /// これらを1つのグループに統合して、同じ名前にリネームされるようにする。
+    /// </summary>
+    private static void MergeImplicitInterfaceGroups(
+        List<TypeDef> allTypes,
+        Dictionary<(TypeDef rootType, string name, string sig), List<MethodDef>> groups,
+        Dictionary<string, TypeDef> typeByFullName)
+    {
+        // (メソッド名, シグネチャ文字列) → 該当する全グループキーのリスト
+        var byNameSig = new Dictionary<(string name, string sig), List<(TypeDef rootType, string name, string sig)>>();
+
+        foreach (var key in groups.Keys)
+        {
+            var nameSig = (key.name, key.sig);
+            if (!byNameSig.TryGetValue(nameSig, out var list))
+            {
+                list = new List<(TypeDef, string, string)>();
+                byNameSig[nameSig] = list;
+            }
+            list.Add(key);
+        }
+
+        // 同じ名前+シグネチャで複数グループがある場合、型の関係性をチェックして統合
+        foreach (var (nameSig, keys) in byNameSig)
+        {
+            if (keys.Count <= 1) continue;
+
+            // インターフェイス型のグループを探す
+            var ifaceKeys = keys.Where(k => k.rootType.IsInterface).ToList();
+            var classKeys = keys.Where(k => !k.rootType.IsInterface).ToList();
+
+            foreach (var ifaceKey in ifaceKeys)
+            {
+                var ifaceType = ifaceKey.rootType;
+
+                foreach (var classKey in classKeys.ToList())
+                {
+                    var classType = classKey.rootType;
+
+                    // classType がこのインターフェイスを（直接・間接に）実装しているか
+                    if (!ImplementsInterface(classType, ifaceType.FullName, typeByFullName))
+                        continue;
+
+                    // 統合: classKey のメンバーを ifaceKey のグループに移動
+                    if (groups.TryGetValue(classKey, out var classGroup) &&
+                        groups.TryGetValue(ifaceKey, out var ifaceGroup))
+                    {
+                        foreach (var m in classGroup)
+                        {
+                            if (!ifaceGroup.Contains(m))
+                                ifaceGroup.Add(m);
+                        }
+                        groups.Remove(classKey);
+                        classKeys.Remove(classKey);
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 型がインターフェイスを直接・間接的に実装しているかチェック。
+    /// </summary>
+    private static bool ImplementsInterface(TypeDef type, string ifaceFullName, Dictionary<string, TypeDef> typeByFullName)
+    {
+        // 直接実装
+        if (type.Interfaces.Any(i => i.Interface.FullName == ifaceFullName))
+            return true;
+
+        // 基底型を辿る
+        var baseRef = type.BaseType;
+        while (baseRef != null)
+        {
+            if (!typeByFullName.TryGetValue(baseRef.FullName, out var baseType))
+                break;
+            if (baseType.Interfaces.Any(i => i.Interface.FullName == ifaceFullName))
+                return true;
+            baseRef = baseType.BaseType;
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// グループ内のメソッドが外部型（モジュール外）のメソッドに紐付いているかチェック。
     /// 以下のケースで true を返す:
