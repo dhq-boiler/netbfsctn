@@ -649,12 +649,17 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         }
 
         // プロパティの名前変更（getter/setterメソッド名も連動）
+        // virtual プロパティは RenameVirtualPropertyGroups で処理するためスキップ
         if (enableRenameProperties)
         {
             foreach (var property in type.Properties)
             {
                 var isPublic = property.GetMethod?.IsPublic == true || property.SetMethod?.IsPublic == true;
                 if (isPublic && !renamePublic)
+                    continue;
+
+                // virtual プロパティはグループリネームに任せる
+                if (property.GetMethod?.IsVirtual == true || property.SetMethod?.IsVirtual == true)
                     continue;
 
                 var newName = context.NameGenerator.Next();
@@ -664,33 +669,28 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
 
                 if (property.GetMethod != null && (!property.GetMethod.IsPublic || renamePublic))
                 {
-                    if (!property.GetMethod.IsVirtual && !property.GetMethod.HasOverrides)
-                    {
-                        var oldGetterName = property.GetMethod.Name.String;
-                        var getterName = "get_" + newName;
-                        context.NameMap[property.GetMethod.FullName] = getterName;
-                        context.MemberRenameHistory[(type, oldGetterName)] = getterName;
-                        sameModuleRenames[(type, oldGetterName)] = getterName;
-                        property.GetMethod.Name = getterName;
-                    }
+                    var oldGetterName = property.GetMethod.Name.String;
+                    var getterName = "get_" + newName;
+                    context.NameMap[property.GetMethod.FullName] = getterName;
+                    context.MemberRenameHistory[(type, oldGetterName)] = getterName;
+                    sameModuleRenames[(type, oldGetterName)] = getterName;
+                    property.GetMethod.Name = getterName;
                 }
                 if (property.SetMethod != null && (!property.SetMethod.IsPublic || renamePublic))
                 {
-                    if (!property.SetMethod.IsVirtual && !property.SetMethod.HasOverrides)
-                    {
-                        var oldSetterName = property.SetMethod.Name.String;
-                        var setterName = "set_" + newName;
-                        context.NameMap[property.SetMethod.FullName] = setterName;
-                        context.MemberRenameHistory[(type, oldSetterName)] = setterName;
-                        sameModuleRenames[(type, oldSetterName)] = setterName;
-                        property.SetMethod.Name = setterName;
-                    }
+                    var oldSetterName = property.SetMethod.Name.String;
+                    var setterName = "set_" + newName;
+                    context.NameMap[property.SetMethod.FullName] = setterName;
+                    context.MemberRenameHistory[(type, oldSetterName)] = setterName;
+                    sameModuleRenames[(type, oldSetterName)] = setterName;
+                    property.SetMethod.Name = setterName;
                 }
             }
         }
 
         // イベントの名前変更（add/remove/raise メソッド名も連動）
-        if (enableRenameProperties) // プロパティと同じカテゴリで制御
+        // virtual イベントは RenameVirtualEventGroups で処理するためスキップ
+        if (enableRenameProperties)
         {
             foreach (var evt in type.Events)
             {
@@ -698,10 +698,8 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 if (isPublic && !renamePublic)
                     continue;
 
-                // アクセサが virtual の場合、外部インターフェイス実装ならスキップ
-                var accessors = new[] { evt.AddMethod, evt.RemoveMethod, evt.InvokeMethod }
-                    .Where(m => m != null).ToList();
-                if (accessors.Any(m => m!.IsVirtual || m.HasOverrides))
+                // virtual イベントはグループリネームに任せる
+                if (evt.AddMethod?.IsVirtual == true || evt.RemoveMethod?.IsVirtual == true)
                     continue;
 
                 var newName = context.NameGenerator.Next();
