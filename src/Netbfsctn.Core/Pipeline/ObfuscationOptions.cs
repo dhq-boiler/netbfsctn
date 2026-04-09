@@ -22,6 +22,7 @@ public class ObfuscationOptions
     public bool EnableRenameFields { get; init; } = true;
     public bool EnableRenameMethods { get; init; } = true;
     public bool EnableRenameProperties { get; init; } = true;
+    public bool EnableRenamePublic { get; init; }
     public bool EnableStringEncryption { get; init; } = true;
     public bool EnableControlFlow { get; init; } = true;
     public bool EnableDeadCode { get; init; } = true;
@@ -39,6 +40,9 @@ public class ObfuscationOptions
     public string? MappingFilePath { get; init; }
     public bool EnableResourceProtection { get; init; }
     public bool EnableCodeVirtualization { get; init; }
+
+    // public リネーム除外アセンブリ名
+    public string[] ExcludeRenamePublic { get; init; } = [];
 
     // 複数アセンブリ同時難読化
     public string[] AdditionalInputPaths { get; init; } = [];

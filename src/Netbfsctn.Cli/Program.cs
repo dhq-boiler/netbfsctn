@@ -42,6 +42,11 @@ var renamePropertiesOption = new Option<bool>("--rename-properties")
     Description = "プロパティ名のみ難読化 (--no-rename と併用で個別有効化)"
 };
 
+var renamePublicOption = new Option<bool>("--rename-public")
+{
+    Description = "public な型・メンバーも難読化対象にする (マルチアセンブリ時にクロス参照を自動修正)"
+};
+
 var noStringsOption = new Option<bool>("--no-strings")
 {
     Description = "文字列暗号化を無効化"
@@ -113,6 +118,12 @@ var virtualizeOption = new Option<bool>("--virtualize")
     Description = "メソッドをカスタム VM バイトコードに変換"
 };
 
+var excludeRenamePublicOption = new Option<string[]>("--exclude-rename-public")
+{
+    Description = "public リネームから除外するアセンブリ名 (複数指定可)",
+    AllowMultipleArgumentsPerToken = true
+};
+
 var additionalInputOption = new Option<string[]>("--additional-input")
 {
     Description = "追加の入力アセンブリパス (複数指定可)",
@@ -134,6 +145,7 @@ rootCommand.Options.Add(renameTypesOption);
 rootCommand.Options.Add(renameFieldsOption);
 rootCommand.Options.Add(renameMethodsOption);
 rootCommand.Options.Add(renamePropertiesOption);
+rootCommand.Options.Add(renamePublicOption);
 rootCommand.Options.Add(noStringsOption);
 rootCommand.Options.Add(noControlFlowOption);
 rootCommand.Options.Add(noDeadCodeOption);
@@ -148,6 +160,7 @@ rootCommand.Options.Add(hideCallsOption);
 rootCommand.Options.Add(mappingFileOption);
 rootCommand.Options.Add(protectResourcesOption);
 rootCommand.Options.Add(virtualizeOption);
+rootCommand.Options.Add(excludeRenamePublicOption);
 rootCommand.Options.Add(additionalInputOption);
 rootCommand.Options.Add(additionalOutputOption);
 
@@ -161,6 +174,7 @@ rootCommand.SetAction(parseResult =>
     var renameFields = parseResult.GetValue(renameFieldsOption);
     var renameMethods = parseResult.GetValue(renameMethodsOption);
     var renameProperties = parseResult.GetValue(renamePropertiesOption);
+    var renamePublic = parseResult.GetValue(renamePublicOption);
     var noStrings = parseResult.GetValue(noStringsOption);
     var noControlFlow = parseResult.GetValue(noControlFlowOption);
     var noDeadCode = parseResult.GetValue(noDeadCodeOption);
@@ -175,6 +189,7 @@ rootCommand.SetAction(parseResult =>
     var mappingFile = parseResult.GetValue(mappingFileOption);
     var protectResources = parseResult.GetValue(protectResourcesOption);
     var virtualize = parseResult.GetValue(virtualizeOption);
+    var excludeRenamePublic = parseResult.GetValue(excludeRenamePublicOption) ?? [];
     var additionalInputs = parseResult.GetValue(additionalInputOption) ?? [];
     var additionalOutputs = parseResult.GetValue(additionalOutputOption) ?? [];
 
@@ -188,11 +203,13 @@ rootCommand.SetAction(parseResult =>
             "source" => ObfuscationMode.Source,
             _ => null
         },
-        EnableRename = !noRename || renameTypes || renameFields || renameMethods || renameProperties,
+        EnableRename = !noRename || renameTypes || renameFields || renameMethods || renameProperties || renamePublic,
         EnableRenameTypes = noRename ? renameTypes : true,
         EnableRenameFields = noRename ? renameFields : true,
         EnableRenameMethods = noRename ? renameMethods : true,
         EnableRenameProperties = noRename ? renameProperties : true,
+        EnableRenamePublic = renamePublic,
+        ExcludeRenamePublic = excludeRenamePublic,
         EnableStringEncryption = !noStrings,
         EnableControlFlow = !noControlFlow,
         EnableDeadCode = !noDeadCode,
