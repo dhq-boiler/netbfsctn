@@ -31,7 +31,9 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
 
         if (renamePublic)
         {
-            RenameVirtualMethodGroups(module, context, result, sameModuleRenames);
+            // virtualメソッドグループリネームはメタデータ上は正しく動作するが、
+            // C++/CLIランタイムのvtableディスパッチと互換性がない（原因調査中）
+            // RenameVirtualMethodGroups(module, context, result, sameModuleRenames);
             RenameVirtualPropertyGroups(module, context, result, sameModuleRenames);
             RenameVirtualEventGroups(module, context, result, sameModuleRenames);
         }
