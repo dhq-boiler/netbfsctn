@@ -2,6 +2,7 @@ using System.Text.Json;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
 using dnlib.DotNet.Writer;
+using Netbfsctn.Core.Logging;
 using Netbfsctn.Core.Pipeline;
 using Netbfsctn.Core.Techniques;
 using Netbfsctn.IL.Techniques;
@@ -15,51 +16,145 @@ public class ILObfuscationPipeline : IObfuscationPipeline
         var options = context.Options;
         var logger = context.Logger;
 
+        var modules = new List<ModuleDefMD>();
+
         try
         {
-            // メインアセンブリを処理
-            var mainOutputPath = options.OutputPath
-                ?? BuildDefaultOutputPath(options.InputPath);
-            var result = ExecuteSingle(context, options.InputPath, mainOutputPath);
-            if (!result.Success)
-                return result;
+            // ── Phase 1: 全モジュールをロード ──
+            var entries = new List<(string inputPath, string outputPath, bool isMixedMode)>();
 
-            // 追加アセンブリを同じコンテキスト（NameMap/NameGenerator共有）で処理
+            var mainOutput = options.OutputPath ?? BuildDefaultOutputPath(options.InputPath);
+            logger.Info($"アセンブリを読み込み中: {options.InputPath}");
+            var mainModule = ModuleDefMD.Load(options.InputPath);
+            modules.Add(mainModule);
+            var mainMixed = !mainModule.IsILOnly;
+            if (mainMixed)
+                logger.Info("混合モード (C++/CLI) アセンブリを検出しました。NativeModuleWriter を使用します。");
+            entries.Add((options.InputPath, mainOutput, mainMixed));
+
             for (var i = 0; i < options.AdditionalInputPaths.Length; i++)
             {
-                var additionalInput = options.AdditionalInputPaths[i];
-                var additionalOutput = i < options.AdditionalOutputPaths.Length
+                var addInput = options.AdditionalInputPaths[i];
+                var addOutput = i < options.AdditionalOutputPaths.Length
                     ? options.AdditionalOutputPaths[i]
-                    : BuildDefaultOutputPath(additionalInput);
+                    : BuildDefaultOutputPath(addInput);
 
-                logger.Info($"追加アセンブリを処理中: {additionalInput}");
-                var additionalResult = ExecuteSingle(context, additionalInput, additionalOutput);
-                if (!additionalResult.Success)
-                {
-                    logger.Error($"追加アセンブリの処理に失敗: {additionalInput} - {additionalResult.ErrorMessage}");
-                    return additionalResult;
-                }
-
-                // 結果を集約
-                result.RenamedSymbols += additionalResult.RenamedSymbols;
-                result.EncryptedStrings += additionalResult.EncryptedStrings;
-                result.ObfuscatedMethods += additionalResult.ObfuscatedMethods;
-                result.InsertedDeadCodeBlocks += additionalResult.InsertedDeadCodeBlocks;
-                result.EncryptedMethodBodies += additionalResult.EncryptedMethodBodies;
-                result.HiddenMethodCalls += additionalResult.HiddenMethodCalls;
-                result.ProtectedResources += additionalResult.ProtectedResources;
-                result.VirtualizedMethods += additionalResult.VirtualizedMethods;
-
-                logger.Success($"追加アセンブリ完了: {additionalOutput}");
+                logger.Info($"追加アセンブリを読み込み中: {addInput}");
+                var addModule = ModuleDefMD.Load(addInput);
+                modules.Add(addModule);
+                var addMixed = !addModule.IsILOnly;
+                if (addMixed)
+                    logger.Info("混合モード (C++/CLI) アセンブリを検出しました。NativeModuleWriter を使用します。");
+                entries.Add((addInput, addOutput, addMixed));
             }
 
-            // マッピングファイルのポスト処理（全アセンブリ処理後に一括出力）
+            // EnableRenamePublic の除外リストを構築
+            if (options.EnableRenamePublic)
+            {
+                // 手動除外
+                foreach (var name in options.ExcludeRenamePublic)
+                    context.ExcludeRenamePublicModules.Add(name);
+
+                // WPF自動検出: PresentationFramework を参照しているモジュールを除外
+                foreach (var module in modules)
+                {
+                    var moduleName = module.Assembly?.Name?.String ?? "";
+                    if (IsWpfAssembly(module))
+                    {
+                        context.ExcludeRenamePublicModules.Add(moduleName);
+                        logger.Info($"WPF アセンブリを検出: {moduleName} (public リネームから自動除外)");
+                    }
+                    else if (context.ExcludeRenamePublicModules.Contains(moduleName))
+                    {
+                        logger.Info($"public リネーム除外 (手動指定): {moduleName}");
+                    }
+                    else
+                    {
+                        logger.Info($"public リネーム対象: {moduleName}");
+                    }
+                }
+            }
+
+            // ── Phase 2a: リネーム前に TypeRef → TypeDef を事前解決 ──
+            // リネーム後は名前ベースの Resolve() が失敗するため、
+            // 名前が一致している今のうちに TypeRef → TypeDef を解決しキャッシュする。
+            var typeRefCache = new Dictionary<TypeRef, TypeDef>();
+            var hasRenamePublicTargets = options.EnableRenamePublic
+                && modules.Any(m => !context.ExcludeRenamePublicModules.Contains(m.Assembly?.Name?.String ?? ""));
+            if (modules.Count > 1 && hasRenamePublicTargets && options.EnableRename)
+            {
+                logger.Info("クロスアセンブリ TypeRef を事前解決中...");
+                PreResolveTypeRefs(modules, typeRefCache, logger);
+            }
+
+            // ── Phase 2b: 全モジュールにテクニックを適用 ──
+            var result = new ObfuscationResult { Success = true, OutputPath = mainOutput };
+            var techniques = BuildTechniqueList(options);
+
+            foreach (var module in modules)
+            {
+                logger.Info($"アセンブリを処理中: {module.Name}");
+                foreach (var technique in techniques)
+                {
+                    logger.Info($"  適用中: {technique.Name}");
+                    technique.Apply(module, context, result);
+                }
+            }
+
+            // ── Phase 3: TypeRef を同期し、MemberRef を MemberRenameHistory から修正 ──
+            if (typeRefCache.Count > 0)
+            {
+                logger.Info("クロスアセンブリ参照を同期中...");
+                SyncCrossAssemblyRefs(modules, typeRefCache, context, logger);
+            }
+
+            // ── Phase 4: 後処理（ブランチ最適化・maxStack再計算）──
+            foreach (var module in modules)
+            {
+                foreach (var type in module.GetTypes())
+                {
+                    foreach (var method in type.Methods)
+                    {
+                        if (!method.HasBody) continue;
+                        var body = method.Body;
+                        body.SimplifyBranches();
+                        body.OptimizeBranches();
+                    }
+                }
+
+                foreach (var type in module.GetTypes())
+                {
+                    foreach (var method in type.Methods)
+                    {
+                        if (!method.HasBody) continue;
+                        if (!method.Body.KeepOldMaxStack) continue;
+                        method.Body.MaxStack = (ushort)CalculateMaxStack(method.Body, method);
+                    }
+                }
+            }
+
+            // ── Phase 5: 全モジュールを書き出し ──
+            for (var i = 0; i < modules.Count; i++)
+            {
+                var (_, outputPath, isMixedMode) = entries[i];
+                var dir = Path.GetDirectoryName(outputPath);
+                if (!string.IsNullOrEmpty(dir))
+                    Directory.CreateDirectory(dir);
+
+                logger.Info($"保存中: {outputPath}");
+                WriteModule(modules[i], outputPath, isMixedMode);
+
+                if (i > 0)
+                    logger.Success($"追加アセンブリ完了: {outputPath}");
+            }
+
+            // ── Phase 6: マッピングファイル出力 ──
             if (options.EnableMappingFile || options.EnableRename)
             {
                 if (options.EnableMappingFile)
                 {
                     var mappingPath = options.MappingFilePath
-                        ?? $"{mainOutputPath}.map.json";
+                        ?? $"{mainOutput}.map.json";
                     var json = JsonSerializer.Serialize(context.NameMap,
                         new JsonSerializerOptions { WriteIndented = true });
                     File.WriteAllText(mappingPath, json);
@@ -75,63 +170,200 @@ public class ILObfuscationPipeline : IObfuscationPipeline
             logger.Error(ex.Message);
             return new ObfuscationResult { Success = false, ErrorMessage = ex.Message };
         }
+        finally
+        {
+            foreach (var module in modules)
+                module.Dispose();
+        }
     }
 
-    private ObfuscationResult ExecuteSingle(ObfuscationContext context, string inputPath, string outputPath)
+    /// <summary>
+    /// WPF アセンブリかどうかを判定する。
+    /// PresentationFramework または WindowsBase への参照があれば WPF とみなす。
+    /// </summary>
+    private static bool IsWpfAssembly(ModuleDefMD module)
     {
-        var options = context.Options;
-        var logger = context.Logger;
-
-        logger.Info($"アセンブリを読み込み中: {inputPath}");
-        using var module = ModuleDefMD.Load(inputPath);
-
-        var isMixedMode = !module.IsILOnly;
-        if (isMixedMode)
-            logger.Info("混合モード (C++/CLI) アセンブリを検出しました。NativeModuleWriter を使用します。");
-
-        var result = new ObfuscationResult { Success = true, OutputPath = outputPath };
-
-        var techniques = BuildTechniqueList(options);
-
-        foreach (var technique in techniques)
+        foreach (var asmRef in module.GetAssemblyRefs())
         {
-            logger.Info($"適用中: {technique.Name}");
-            technique.Apply(module, context, result);
+            var name = asmRef.Name.String;
+            if (name == "PresentationFramework" || name == "PresentationCore")
+                return true;
         }
+        return false;
+    }
 
-        var dir = Path.GetDirectoryName(outputPath);
-        if (!string.IsNullOrEmpty(dir))
-            Directory.CreateDirectory(dir);
+    /// <summary>
+    /// リネーム前に全モジュール間の TypeRef → TypeDef を解決しキャッシュする。
+    /// </summary>
+    private static void PreResolveTypeRefs(
+        List<ModuleDefMD> modules,
+        Dictionary<TypeRef, TypeDef> cache,
+        ObfuscationLogger logger)
+    {
+        var asmResolver = new AssemblyResolver();
+        var modCtx = new ModuleContext(asmResolver);
+        asmResolver.DefaultModuleContext = modCtx;
 
-        // 難読化後のメソッドでブランチ最適化
-        foreach (var type in module.GetTypes())
+        var batchAssemblyNames = new HashSet<string>();
+        foreach (var module in modules)
         {
-            foreach (var method in type.Methods)
+            module.Context = modCtx;
+            if (module.Assembly != null)
             {
-                if (!method.HasBody) continue;
-                var body = method.Body;
-                body.SimplifyBranches();
-                body.OptimizeBranches();
+                asmResolver.AddToCache(module.Assembly);
+                batchAssemblyNames.Add(module.Assembly.Name.String);
             }
         }
 
-        // KeepOldMaxStack が設定されたメソッド（制御フロー難読化済み）の maxStack を
-        // 最終命令列から正確に再計算する。後続テクニックが命令を追加・変更している可能性があるため、
-        // 全テクニック適用後にここで計算する必要がある。
-        foreach (var type in module.GetTypes())
+        foreach (var module in modules)
         {
-            foreach (var method in type.Methods)
+            var myAssemblyName = module.Assembly?.Name?.String ?? "";
+
+            foreach (var typeRef in module.GetTypeRefs())
             {
-                if (!method.HasBody) continue;
-                if (!method.Body.KeepOldMaxStack) continue;
-                method.Body.MaxStack = (ushort)CalculateMaxStack(method.Body, method);
+                var asmName = GetReferencedAssemblyName(typeRef);
+                if (asmName == null || !batchAssemblyNames.Contains(asmName) || asmName == myAssemblyName)
+                    continue;
+
+                var resolved = typeRef.Resolve();
+                if (resolved != null)
+                    cache[typeRef] = resolved;
             }
         }
 
-        logger.Info($"保存中: {outputPath}");
-        WriteModule(module, outputPath, isMixedMode);
+        logger.Info($"TypeRef 事前解決完了: {cache.Count} 件");
+    }
 
-        return result;
+    /// <summary>
+    /// リネーム後にクロスアセンブリ参照を同期する。
+    /// TypeRef はキャッシュ済み TypeDef から名前を同期。
+    /// MemberRef は TypeRef→TypeDef + 基底型チェーン走査 + MemberRenameHistory で名前を取得。
+    /// </summary>
+    private static void SyncCrossAssemblyRefs(
+        List<ModuleDefMD> modules,
+        Dictionary<TypeRef, TypeDef> typeRefCache,
+        ObfuscationContext context,
+        ObfuscationLogger logger)
+    {
+        var fixedTypeRefs = 0;
+        var fixedMemberRefs = 0;
+        var missedMemberRefs = 0;
+
+        TypeDef? FindTypeDef(IMemberRefParent? cls)
+        {
+            return cls switch
+            {
+                TypeRef tr => typeRefCache.GetValueOrDefault(tr),
+                TypeSpec ts => FindTypeDefFromTypeSpec(ts, typeRefCache),
+                _ => null
+            };
+        }
+
+        // 基底型チェーンを辿って MemberRenameHistory を検索
+        string? FindRenamedMember(TypeDef? typeDef, string memberName)
+        {
+            var current = typeDef;
+            while (current != null)
+            {
+                var key = ((object)current, memberName);
+                if (context.MemberRenameHistory.TryGetValue(key, out var newName))
+                    return newName;
+
+                // 基底型を辿る
+                var baseType = current.BaseType;
+                if (baseType == null) break;
+
+                current = baseType switch
+                {
+                    TypeDef td => td,
+                    TypeRef tr => typeRefCache.GetValueOrDefault(tr) ?? tr.Resolve(),
+                    TypeSpec ts => FindTypeDefFromTypeSpec(ts, typeRefCache),
+                    _ => null
+                };
+            }
+            return null;
+        }
+
+        foreach (var module in modules)
+        {
+            var processed = new HashSet<MemberRef>();
+
+            void SyncMemberRef(MemberRef mr)
+            {
+                if (!processed.Add(mr)) return;
+
+                var typeDef = FindTypeDef(mr.Class);
+                if (typeDef == null) return;
+
+                var newName = FindRenamedMember(typeDef, mr.Name.String);
+                if (newName != null)
+                {
+                    logger.Verbose($"MemberRef同期: {mr.Name} -> {newName} (in {module.Name})");
+                    mr.Name = newName;
+                    fixedMemberRefs++;
+                }
+                else
+                {
+                    // フィールド/メソッドがリネーム対象外（public でスキップ、コンストラクタ等）の場合は正常
+                    // リネームされたはずなのに見つからない場合は警告
+                    missedMemberRefs++;
+                    logger.Verbose($"MemberRef未修正 (リネーム対象外の可能性): {typeDef.FullName}.{mr.Name} (in {module.Name})");
+                }
+            }
+
+            // Pass 1: MemberRef テーブル
+            foreach (var mr in module.GetMemberRefs())
+                SyncMemberRef(mr);
+
+            // Pass 2: IL 命令オペランド
+            foreach (var type in module.GetTypes())
+            {
+                foreach (var method in type.Methods)
+                {
+                    if (!method.HasBody) continue;
+                    foreach (var instr in method.Body.Instructions)
+                    {
+                        if (instr.Operand is MemberRef mr)
+                            SyncMemberRef(mr);
+                    }
+                }
+            }
+        }
+
+        // TypeRef の名前同期
+        foreach (var (typeRef, typeDef) in typeRefCache)
+        {
+            if (typeRef.Name != typeDef.Name)
+            {
+                logger.Verbose($"TypeRef同期: {typeRef.Name} -> {typeDef.Name}");
+                typeRef.Name = typeDef.Name;
+                fixedTypeRefs++;
+            }
+            if (typeRef.ResolutionScope is not TypeRef && typeRef.Namespace != typeDef.Namespace)
+                typeRef.Namespace = typeDef.Namespace;
+        }
+
+        logger.Info($"クロスアセンブリ参照修正完了: TypeRef={fixedTypeRefs}, MemberRef={fixedMemberRefs} (未修正={missedMemberRefs})");
+    }
+
+    private static string? GetReferencedAssemblyName(TypeRef typeRef)
+    {
+        var scope = typeRef.ResolutionScope;
+        while (scope is TypeRef parentTypeRef)
+            scope = parentTypeRef.ResolutionScope;
+        return (scope as AssemblyRef)?.Name?.String;
+    }
+
+    private static TypeDef? FindTypeDefFromTypeSpec(TypeSpec typeSpec, Dictionary<TypeRef, TypeDef> cache)
+    {
+        var typeSig = typeSpec.TypeSig;
+        while (typeSig is ModifierSig modSig)
+            typeSig = modSig.Next;
+        if (typeSig is GenericInstSig genSig)
+            typeSig = genSig.GenericType;
+        if ((typeSig as ClassOrValueTypeSig)?.TypeDefOrRef is TypeRef tr)
+            return cache.GetValueOrDefault(tr);
+        return null;
     }
 
     private static void WriteModule(ModuleDefMD module, string outputPath, bool isMixedMode)
