@@ -460,6 +460,12 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 if (isPublic && !renamePublic)
                     continue;
 
+                // アクセサが virtual の場合、外部インターフェイス実装ならスキップ
+                var accessors = new[] { evt.AddMethod, evt.RemoveMethod, evt.InvokeMethod }
+                    .Where(m => m != null).ToList();
+                if (accessors.Any(m => m!.IsVirtual || m.HasOverrides))
+                    continue;
+
                 var newName = context.NameGenerator.Next();
                 context.Logger.Verbose($"イベント: {evt.Name} -> {newName}");
                 evt.Name = newName;
