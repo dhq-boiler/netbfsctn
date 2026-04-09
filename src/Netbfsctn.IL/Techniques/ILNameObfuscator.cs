@@ -338,6 +338,8 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
     /// <summary>
     /// 型が実装する全インターフェイス（直接・間接）のうち、モジュール外のものに
     /// 同名メソッドがあるかチェック。
+    /// ジェネリックインターフェイス (IEquatable&lt;T&gt; 等) ではシグネチャの型パラメータが
+    /// 具象型と一致しないため、名前のみで照合する。
     /// </summary>
     private static bool HasMethodInExternalInterfaces(
         TypeDef type, string methodName, MethodSig? methodSig,
@@ -367,9 +369,8 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 continue; // それ以外はドメイン固有とみなして続行
             }
 
-            if (resolved.Methods.Any(m =>
-                m.Name == methodName &&
-                new SigComparer().Equals(m.MethodSig, methodSig)))
+            // 名前のみで照合（ジェネリック型パラメータの不一致を回避）
+            if (resolved.Methods.Any(m => m.Name == methodName))
                 return true;
         }
 
@@ -408,9 +409,8 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 break; // 解決不能だがドメイン固有メソッドなら続行
             }
 
-            if (resolved.Methods.Any(m =>
-                m.IsVirtual && m.Name == methodName &&
-                new SigComparer().Equals(m.MethodSig, methodSig)))
+            // 名前のみで照合（ジェネリック型パラメータの不一致を回避）
+            if (resolved.Methods.Any(m => m.IsVirtual && m.Name == methodName))
                 return true;
 
             current = resolved.BaseType;
@@ -996,6 +996,61 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         if (method.IsPinvokeImpl) return true;
         // ランタイム実装メソッド (デリゲートの Invoke 等)
         if (method.IsRuntime) return true;
+        return false;
+    }
+
+    /// <summary>
+    /// 非 virtual メソッドが外部インターフェースの暗黙的実装かどうかをチェックする。
+    /// 構造体や sealed クラスのインターフェース実装は IsVirtual=false だが、
+    /// CLR は名前+シグネチャで暗黙マッチングするため、リネームすると TypeLoadException になる。
+    /// </summary>
+    private static bool IsImplicitExternalInterfaceMethod(TypeDef type, MethodDef method)
+    {
+        if (type.Interfaces.Count == 0) return false;
+
+        var methodName = method.Name.String;
+
+        foreach (var iface in type.Interfaces)
+        {
+            var resolved = iface.Interface.ResolveTypeDef();
+            if (resolved == null)
+            {
+                if (IsWellKnownRuntimeMethodName(methodName))
+                    return true;
+                continue;
+            }
+
+            // モジュール内インターフェースはスキップ (virtual グループリネームで処理される)
+            if (resolved.Module == type.Module) continue;
+
+            if (resolved.Methods.Any(m => m.Name == methodName))
+                return true;
+        }
+
+        // 基底型のインターフェースもチェック (間接的な実装)
+        var baseRef = type.BaseType;
+        while (baseRef != null)
+        {
+            var baseDef = baseRef.ResolveTypeDef();
+            if (baseDef == null) break;
+
+            foreach (var iface in baseDef.Interfaces)
+            {
+                var resolved = iface.Interface.ResolveTypeDef();
+                if (resolved == null)
+                {
+                    if (IsWellKnownRuntimeMethodName(methodName))
+                        return true;
+                    continue;
+                }
+                if (resolved.Module == type.Module) continue;
+                if (resolved.Methods.Any(m => m.Name == methodName))
+                    return true;
+            }
+
+            baseRef = baseDef.BaseType;
+        }
+
         return false;
     }
 
