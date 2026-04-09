@@ -259,13 +259,13 @@ public class ILObfuscationPipeline : IObfuscationPipeline
             };
         }
 
-        // 基底型チェーンを辿って MemberRenameHistory を検索
-        string? FindRenamedMember(TypeDef? typeDef, string memberName)
+        // 基底型チェーンを辿って MemberRenameHistory を検索（パラメータ数付き）
+        string? FindRenamedMember(TypeDef? typeDef, string memberName, int paramCount)
         {
             var current = typeDef;
             while (current != null)
             {
-                var key = ((object)current, memberName);
+                var key = ((object)current, memberName, paramCount);
                 if (context.MemberRenameHistory.TryGetValue(key, out var newName))
                     return newName;
 
@@ -284,6 +284,21 @@ public class ILObfuscationPipeline : IObfuscationPipeline
             return null;
         }
 
+        // TypeRef の名前同期（MemberRef 同期より先に行う）
+        // MemberRef のシグネチャ文字列が TypeRef の名前に依存するため、
+        // TypeRef を先に更新しないとシグネチャ比較が失敗する。
+        foreach (var (typeRef, typeDef) in typeRefCache)
+        {
+            if (typeRef.Name != typeDef.Name)
+            {
+                logger.Verbose($"TypeRef同期: {typeRef.Name} -> {typeDef.Name}");
+                typeRef.Name = typeDef.Name;
+                fixedTypeRefs++;
+            }
+            if (typeRef.ResolutionScope is not TypeRef && typeRef.Namespace != typeDef.Namespace)
+                typeRef.Namespace = typeDef.Namespace;
+        }
+
         foreach (var module in modules)
         {
             var processed = new HashSet<MemberRef>();
@@ -295,7 +310,9 @@ public class ILObfuscationPipeline : IObfuscationPipeline
                 var typeDef = FindTypeDef(mr.Class);
                 if (typeDef == null) return;
 
-                var newName = FindRenamedMember(typeDef, mr.Name.String);
+                // MemberRef のパラメータ数を取得（フィールドは -1）
+                var paramCount = mr.MethodSig?.Params?.Count ?? -1;
+                var newName = FindRenamedMember(typeDef, mr.Name.String, paramCount);
                 if (newName != null)
                 {
                     logger.Verbose($"MemberRef同期: {mr.Name} -> {newName} (in {module.Name})");
@@ -328,19 +345,6 @@ public class ILObfuscationPipeline : IObfuscationPipeline
                     }
                 }
             }
-        }
-
-        // TypeRef の名前同期
-        foreach (var (typeRef, typeDef) in typeRefCache)
-        {
-            if (typeRef.Name != typeDef.Name)
-            {
-                logger.Verbose($"TypeRef同期: {typeRef.Name} -> {typeDef.Name}");
-                typeRef.Name = typeDef.Name;
-                fixedTypeRefs++;
-            }
-            if (typeRef.ResolutionScope is not TypeRef && typeRef.Namespace != typeDef.Namespace)
-                typeRef.Namespace = typeDef.Namespace;
         }
 
         logger.Info($"クロスアセンブリ参照修正完了: TypeRef={fixedTypeRefs}, MemberRef={fixedMemberRefs} (未修正={missedMemberRefs})");

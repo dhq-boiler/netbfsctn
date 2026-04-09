@@ -11,11 +11,13 @@ public class ObfuscationContext
     public Dictionary<string, string> NameMap { get; } = new();
 
     /// <summary>
-    /// メンバーリネーム履歴: (TypeDef のオブジェクト参照, 元のメンバー名) → 新しいメンバー名。
+    /// メンバーリネーム履歴: (TypeDef のオブジェクト参照, 元のメンバー名, パラメータ数) → 新しいメンバー名。
     /// ILNameObfuscator が記録し、パイプラインのクロスアセンブリ参照修正フェーズで使用する。
     /// TypeDef はリネーム後も同一オブジェクトなので、オブジェクト参照で安全にルックアップできる。
+    /// パラメータ数で区別することで、同名メソッドのオーバーロード (例: Dispose() と Dispose(bool)) を正しく処理する。
+    /// フィールドは -1 を使用。
     /// </summary>
-    public Dictionary<(object TypeDef, string OldMemberName), string> MemberRenameHistory { get; } = new();
+    public Dictionary<(object TypeDef, string OldMemberName, int ParamCount), string> MemberRenameHistory { get; } = new();
 
     /// <summary>
     /// public リネームから除外するモジュール名のセット。

@@ -31,9 +31,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
 
         if (renamePublic)
         {
-            // virtualメソッドグループリネームはメタデータ上は正しく動作するが、
-            // C++/CLIランタイムのvtableディスパッチと互換性がない（原因調査中）
-            // RenameVirtualMethodGroups(module, context, result, sameModuleRenames);
+            RenameVirtualMethodGroups(module, context, result, sameModuleRenames);
             RenameVirtualPropertyGroups(module, context, result, sameModuleRenames);
             RenameVirtualEventGroups(module, context, result, sameModuleRenames);
         }
@@ -141,7 +139,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             foreach (var method in group)
             {
                 var oldName = method.Name.String;
-                context.MemberRenameHistory[(method.DeclaringType, oldName)] = newName;
+                context.MemberRenameHistory[(method.DeclaringType, oldName, method.MethodSig?.Params?.Count ?? 0)] = newName;
                 sameModuleRenames[(method.DeclaringType, oldName)] = newName;
                 context.Logger.Verbose($"virtual グループリネーム: {method.DeclaringType.Name}.{oldName} -> {newName}");
                 method.Name = newName;
@@ -198,56 +196,78 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         Dictionary<(TypeDef rootType, string name, string sig), List<MethodDef>> groups,
         Dictionary<string, TypeDef> typeByFullName)
     {
-        // (メソッド名, シグネチャ文字列) → 該当する全グループキーのリスト
-        var byNameSig = new Dictionary<(string name, string sig), List<(TypeDef rootType, string name, string sig)>>();
-
-        foreach (var key in groups.Keys)
+        // メソッドからそれが属するグループキーを逆引き
+        var methodToGroupKey = new Dictionary<MethodDef, (TypeDef rootType, string name, string sig)>();
+        foreach (var (key, group) in groups)
         {
-            var nameSig = (key.name, key.sig);
-            if (!byNameSig.TryGetValue(nameSig, out var list))
-            {
-                list = new List<(TypeDef, string, string)>();
-                byNameSig[nameSig] = list;
-            }
-            list.Add(key);
+            foreach (var m in group)
+                methodToGroupKey[m] = key;
         }
 
-        // 同じ名前+シグネチャで複数グループがある場合、型の関係性をチェックして統合
-        foreach (var (nameSig, keys) in byNameSig)
+        // 各インターフェイスグループについて、全実装型をチェック
+        var ifaceGroupKeys = groups.Keys.Where(k => k.rootType.IsInterface).ToList();
+
+        foreach (var ifaceKey in ifaceGroupKeys)
         {
-            if (keys.Count <= 1) continue;
+            if (!groups.ContainsKey(ifaceKey)) continue; // 既にマージ済み
 
-            // インターフェイス型のグループを探す
-            var ifaceKeys = keys.Where(k => k.rootType.IsInterface).ToList();
-            var classKeys = keys.Where(k => !k.rootType.IsInterface).ToList();
+            var ifaceType = ifaceKey.rootType;
+            var methodName = ifaceKey.name;
+            var methodSig = ifaceKey.sig;
 
-            foreach (var ifaceKey in ifaceKeys)
+            // このインターフェイスを実装する全型を走査
+            foreach (var type in allTypes)
             {
-                var ifaceType = ifaceKey.rootType;
+                if (type.IsInterface) continue;
+                if (!ImplementsInterface(type, ifaceType.FullName, typeByFullName))
+                    continue;
 
-                foreach (var classKey in classKeys.ToList())
+                // この型（またはその基底型チェーン）で、同名+同シグネチャのvirtualメソッドを探す
+                var implMethod = FindMethodInChain(type, methodName, methodSig, typeByFullName);
+                if (implMethod == null) continue;
+
+                // このメソッドが属するグループを見つける
+                if (!methodToGroupKey.TryGetValue(implMethod, out var implKey)) continue;
+                if (implKey.Equals(ifaceKey)) continue; // 既に同じグループ
+
+                // マージ: 実装側のグループをインターフェイスグループに統合
+                if (groups.TryGetValue(implKey, out var implGroup) &&
+                    groups.TryGetValue(ifaceKey, out var ifaceGroup))
                 {
-                    var classType = classKey.rootType;
-
-                    // classType がこのインターフェイスを（直接・間接に）実装しているか
-                    if (!ImplementsInterface(classType, ifaceType.FullName, typeByFullName))
-                        continue;
-
-                    // 統合: classKey のメンバーを ifaceKey のグループに移動
-                    if (groups.TryGetValue(classKey, out var classGroup) &&
-                        groups.TryGetValue(ifaceKey, out var ifaceGroup))
+                    foreach (var m in implGroup)
                     {
-                        foreach (var m in classGroup)
-                        {
-                            if (!ifaceGroup.Contains(m))
-                                ifaceGroup.Add(m);
-                        }
-                        groups.Remove(classKey);
-                        classKeys.Remove(classKey);
+                        if (!ifaceGroup.Contains(m))
+                            ifaceGroup.Add(m);
+                        methodToGroupKey[m] = ifaceKey;
                     }
+                    groups.Remove(implKey);
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// 型の継承チェーンを辿り、同名+同シグネチャのvirtualメソッドを探す。
+    /// CLR の暗黙的インターフェイス実装マッチングと同じ挙動。
+    /// </summary>
+    private static MethodDef? FindMethodInChain(
+        TypeDef type, string methodName, string sigStr,
+        Dictionary<string, TypeDef> typeByFullName)
+    {
+        var current = type;
+        while (current != null)
+        {
+            var match = current.Methods.FirstOrDefault(m =>
+                m.IsVirtual && m.Name == methodName &&
+                (m.MethodSig?.ToString() ?? "") == sigStr);
+            if (match != null) return match;
+
+            var baseRef = current.BaseType;
+            if (baseRef == null) break;
+            if (!typeByFullName.TryGetValue(baseRef.FullName, out current))
+                break;
+        }
+        return null;
     }
 
     /// <summary>
@@ -526,7 +546,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 {
                     var oldName = prop.GetMethod.Name.String;
                     var getterName = "get_" + newName;
-                    context.MemberRenameHistory[(type, oldName)] = getterName;
+                    context.MemberRenameHistory[(type, oldName, prop.GetMethod.MethodSig?.Params?.Count ?? 0)] = getterName;
                     sameModuleRenames[(type, oldName)] = getterName;
                     prop.GetMethod.Name = getterName;
                 }
@@ -534,7 +554,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 {
                     var oldName = prop.SetMethod.Name.String;
                     var setterName = "set_" + newName;
-                    context.MemberRenameHistory[(type, oldName)] = setterName;
+                    context.MemberRenameHistory[(type, oldName, prop.SetMethod.MethodSig?.Params?.Count ?? 0)] = setterName;
                     sameModuleRenames[(type, oldName)] = setterName;
                     prop.SetMethod.Name = setterName;
                 }
@@ -600,7 +620,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 {
                     var oldName = evt.AddMethod.Name.String;
                     var addName = "add_" + newName;
-                    context.MemberRenameHistory[(type, oldName)] = addName;
+                    context.MemberRenameHistory[(type, oldName, evt.AddMethod.MethodSig?.Params?.Count ?? 0)] = addName;
                     sameModuleRenames[(type, oldName)] = addName;
                     evt.AddMethod.Name = addName;
                 }
@@ -608,7 +628,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 {
                     var oldName = evt.RemoveMethod.Name.String;
                     var removeName = "remove_" + newName;
-                    context.MemberRenameHistory[(type, oldName)] = removeName;
+                    context.MemberRenameHistory[(type, oldName, evt.RemoveMethod.MethodSig?.Params?.Count ?? 0)] = removeName;
                     sameModuleRenames[(type, oldName)] = removeName;
                     evt.RemoveMethod.Name = removeName;
                 }
@@ -616,7 +636,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 {
                     var oldName = evt.InvokeMethod.Name.String;
                     var raiseName = "raise_" + newName;
-                    context.MemberRenameHistory[(type, oldName)] = raiseName;
+                    context.MemberRenameHistory[(type, oldName, evt.InvokeMethod.MethodSig?.Params?.Count ?? 0)] = raiseName;
                     sameModuleRenames[(type, oldName)] = raiseName;
                     evt.InvokeMethod.Name = raiseName;
                 }
@@ -824,7 +844,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 var newName = context.NameGenerator.Next();
                 context.NameMap[field.FullName] = newName;
                 // TypeDef オブジェクト参照でリネーム履歴を記録（クロスアセンブリ修正用）
-                context.MemberRenameHistory[(type, oldName)] = newName;
+                context.MemberRenameHistory[(type, oldName, -1)] = newName;  // -1 = field
                 sameModuleRenames[(type, oldName)] = newName;
                 context.Logger.Verbose($"フィールド: {oldName} -> {newName}");
                 field.Name = newName;
@@ -843,7 +863,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 var oldName = method.Name.String;
                 var newName = context.NameGenerator.Next();
                 context.NameMap[method.FullName] = newName;
-                context.MemberRenameHistory[(type, oldName)] = newName;
+                context.MemberRenameHistory[(type, oldName, method.MethodSig?.Params?.Count ?? 0)] = newName;
                 sameModuleRenames[(type, oldName)] = newName;
                 context.Logger.Verbose($"メソッド: {oldName} -> {newName}");
                 method.Name = newName;
@@ -875,7 +895,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                     var oldGetterName = property.GetMethod.Name.String;
                     var getterName = "get_" + newName;
                     context.NameMap[property.GetMethod.FullName] = getterName;
-                    context.MemberRenameHistory[(type, oldGetterName)] = getterName;
+                    context.MemberRenameHistory[(type, oldGetterName, property.GetMethod.MethodSig?.Params?.Count ?? 0)] = getterName;
                     sameModuleRenames[(type, oldGetterName)] = getterName;
                     property.GetMethod.Name = getterName;
                 }
@@ -884,7 +904,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                     var oldSetterName = property.SetMethod.Name.String;
                     var setterName = "set_" + newName;
                     context.NameMap[property.SetMethod.FullName] = setterName;
-                    context.MemberRenameHistory[(type, oldSetterName)] = setterName;
+                    context.MemberRenameHistory[(type, oldSetterName, property.SetMethod.MethodSig?.Params?.Count ?? 0)] = setterName;
                     sameModuleRenames[(type, oldSetterName)] = setterName;
                     property.SetMethod.Name = setterName;
                 }
@@ -915,7 +935,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                     var oldAddName = evt.AddMethod.Name.String;
                     var addName = "add_" + newName;
                     context.NameMap[evt.AddMethod.FullName] = addName;
-                    context.MemberRenameHistory[(type, oldAddName)] = addName;
+                    context.MemberRenameHistory[(type, oldAddName, evt.AddMethod.MethodSig?.Params?.Count ?? 0)] = addName;
                     sameModuleRenames[(type, oldAddName)] = addName;
                     evt.AddMethod.Name = addName;
                 }
@@ -924,7 +944,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                     var oldRemoveName = evt.RemoveMethod.Name.String;
                     var removeName = "remove_" + newName;
                     context.NameMap[evt.RemoveMethod.FullName] = removeName;
-                    context.MemberRenameHistory[(type, oldRemoveName)] = removeName;
+                    context.MemberRenameHistory[(type, oldRemoveName, evt.RemoveMethod.MethodSig?.Params?.Count ?? 0)] = removeName;
                     sameModuleRenames[(type, oldRemoveName)] = removeName;
                     evt.RemoveMethod.Name = removeName;
                 }
@@ -933,7 +953,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                     var oldRaiseName = evt.InvokeMethod.Name.String;
                     var raiseName = "raise_" + newName;
                     context.NameMap[evt.InvokeMethod.FullName] = raiseName;
-                    context.MemberRenameHistory[(type, oldRaiseName)] = raiseName;
+                    context.MemberRenameHistory[(type, oldRaiseName, evt.InvokeMethod.MethodSig?.Params?.Count ?? 0)] = raiseName;
                     sameModuleRenames[(type, oldRaiseName)] = raiseName;
                     evt.InvokeMethod.Name = raiseName;
                 }
