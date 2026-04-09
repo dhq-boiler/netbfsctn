@@ -31,7 +31,9 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
 
         if (renamePublic)
         {
-            RenameVirtualMethodGroups(module, context, result, sameModuleRenames);
+            // virtualメソッドグループリネームはC++/CLIのMethodImpl/vtable構造との
+            // 互換性問題が未解決のため無効化。プロパティ/イベントは問題なし。
+            // RenameVirtualMethodGroups(module, context, result, sameModuleRenames);
             RenameVirtualPropertyGroups(module, context, result, sameModuleRenames);
             RenameVirtualEventGroups(module, context, result, sameModuleRenames);
         }
@@ -139,6 +141,34 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 context.Logger.Verbose($"virtual グループリネーム: {method.DeclaringType.Name}.{oldName} -> {newName}");
                 method.Name = newName;
                 result.RenamedSymbols++;
+
+                // MethodImpl (.override) 内の MemberRef も更新
+                // C++/CLI はインターフェイス実装で明示的な .override を生成する
+                if (method.HasOverrides)
+                {
+                    foreach (var ov in method.Overrides)
+                    {
+                        var decl = ov.MethodDeclaration;
+                        if (decl is MemberRef mr && mr.Name != newName)
+                        {
+                            // 同一モジュール内のインターフェイスメソッドへの参照を更新
+                            if (typeByFullName.ContainsKey(mr.DeclaringType?.FullName ?? ""))
+                            {
+                                context.Logger.Verbose($"  .override MemberRef 修正: {mr.Name} -> {newName}");
+                                mr.Name = newName;
+                            }
+                        }
+                        else if (decl is MethodDef md && md.Name != newName)
+                        {
+                            // グループ内で既にリネーム済みなら不要だが、念のため
+                            if (typeByFullName.ContainsKey(md.DeclaringType?.FullName ?? ""))
+                            {
+                                context.Logger.Verbose($"  .override MethodDef 修正: {md.Name} -> {newName}");
+                                md.Name = newName;
+                            }
+                        }
+                    }
+                }
             }
             renamedGroups++;
         }
