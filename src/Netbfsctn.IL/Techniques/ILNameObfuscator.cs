@@ -451,6 +451,50 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             }
         }
 
+        // イベントの名前変更（add/remove/raise メソッド名も連動）
+        if (enableRenameProperties) // プロパティと同じカテゴリで制御
+        {
+            foreach (var evt in type.Events)
+            {
+                var isPublic = evt.AddMethod?.IsPublic == true || evt.RemoveMethod?.IsPublic == true;
+                if (isPublic && !renamePublic)
+                    continue;
+
+                var newName = context.NameGenerator.Next();
+                context.Logger.Verbose($"イベント: {evt.Name} -> {newName}");
+                evt.Name = newName;
+                result.RenamedSymbols++;
+
+                if (evt.AddMethod != null && (!evt.AddMethod.IsPublic || renamePublic))
+                {
+                    var oldAddName = evt.AddMethod.Name.String;
+                    var addName = "add_" + newName;
+                    context.NameMap[evt.AddMethod.FullName] = addName;
+                    context.MemberRenameHistory[(type, oldAddName)] = addName;
+                    sameModuleRenames[(type, oldAddName)] = addName;
+                    evt.AddMethod.Name = addName;
+                }
+                if (evt.RemoveMethod != null && (!evt.RemoveMethod.IsPublic || renamePublic))
+                {
+                    var oldRemoveName = evt.RemoveMethod.Name.String;
+                    var removeName = "remove_" + newName;
+                    context.NameMap[evt.RemoveMethod.FullName] = removeName;
+                    context.MemberRenameHistory[(type, oldRemoveName)] = removeName;
+                    sameModuleRenames[(type, oldRemoveName)] = removeName;
+                    evt.RemoveMethod.Name = removeName;
+                }
+                if (evt.InvokeMethod != null && (!evt.InvokeMethod.IsPublic || renamePublic))
+                {
+                    var oldRaiseName = evt.InvokeMethod.Name.String;
+                    var raiseName = "raise_" + newName;
+                    context.NameMap[evt.InvokeMethod.FullName] = raiseName;
+                    context.MemberRenameHistory[(type, oldRaiseName)] = raiseName;
+                    sameModuleRenames[(type, oldRaiseName)] = raiseName;
+                    evt.InvokeMethod.Name = raiseName;
+                }
+            }
+        }
+
         // 型自体の名前変更
         if (enableRenameTypes)
         {
