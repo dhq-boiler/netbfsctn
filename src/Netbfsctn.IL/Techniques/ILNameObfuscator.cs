@@ -29,13 +29,12 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         if (sameModuleRenames.Count > 0)
             FixSameModuleMemberRefs(module, sameModuleRenames, context);
 
-        // TODO: virtual グループリネームは C++/CLI との互換性問題を解決後に有効化
-        // if (renamePublic)
-        // {
-        //     RenameVirtualMethodGroups(module, context, result, sameModuleRenames);
-        //     RenameVirtualPropertyGroups(module, context, result, sameModuleRenames);
-        //     RenameVirtualEventGroups(module, context, result, sameModuleRenames);
-        // }
+        if (renamePublic)
+        {
+            RenameVirtualMethodGroups(module, context, result, sameModuleRenames);
+            RenameVirtualPropertyGroups(module, context, result, sameModuleRenames);
+            RenameVirtualEventGroups(module, context, result, sameModuleRenames);
+        }
 
         // パラメーター名の難読化（全メソッド対象、型のアクセス修飾子に関係なく安全）
         RenameParameters(module, context, result);
@@ -613,10 +612,12 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             // MemberRef.Class から TypeDef を抽出
             // TypeDef: 直接参照
             // TypeSpec: ジェネリック型インスタンス化 (例: LockFreeQueue<T>) → ベース TypeDef を取得
+            // TypeRef: C++/CLI がインターフェイス経由の virtual 呼び出しで生成 → Resolve で TypeDef に解決
             var td = mr.Class switch
             {
                 TypeDef directTd => directTd,
                 TypeSpec ts => ExtractTypeDefFromTypeSig(ts.TypeSig),
+                TypeRef tr => tr.Resolve(),
                 _ => null
             };
             if (td == null) return;

@@ -56,6 +56,9 @@ results.AppendLine(sp.GetAllConstants());
 var rr = new ResourceReader();
 results.AppendLine(rr.ReadEmbeddedData());
 
+// 5. Virtual dispatch (インターフェイス経由のメソッド/プロパティ/イベント)
+results.AppendLine(VirtualDispatchDemo.Run());
+
 if (verifyMode)
 {
     var hash = SHA256.HashData(Encoding.UTF8.GetBytes(results.ToString()));
