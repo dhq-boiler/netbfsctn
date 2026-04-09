@@ -28,6 +28,36 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         // 同一モジュール内 MemberRef の修正
         if (sameModuleRenames.Count > 0)
             FixSameModuleMemberRefs(module, sameModuleRenames, context);
+
+        // パラメーター名の難読化（全メソッド対象、型のアクセス修飾子に関係なく安全）
+        RenameParameters(module, context, result);
+    }
+
+    private static void RenameParameters(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
+    {
+        var count = 0;
+        foreach (var type in module.GetTypes())
+        {
+            if (type.Name == "<Module>") continue;
+
+            foreach (var method in type.Methods)
+            {
+                if (method.Parameters == null) continue;
+
+                foreach (var param in method.Parameters)
+                {
+                    // 隠しパラメーター (this等) はスキップ
+                    if (param.IsHiddenThisParameter) continue;
+                    if (string.IsNullOrEmpty(param.Name)) continue;
+
+                    param.Name = context.NameGenerator.Next();
+                    count++;
+                }
+            }
+        }
+
+        if (count > 0)
+            context.Logger.Info($"パラメーター名難読化: {count} 件");
     }
 
     private static void FixSameModuleMemberRefs(
