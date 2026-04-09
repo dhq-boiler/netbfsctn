@@ -31,9 +31,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
 
         if (renamePublic)
         {
-            // virtualメソッドグループリネームはC++/CLIのMethodImpl/vtable構造との
-            // 互換性問題が未解決のため無効化。プロパティ/イベントは問題なし。
-            // RenameVirtualMethodGroups(module, context, result, sameModuleRenames);
+            RenameVirtualMethodGroups(module, context, result, sameModuleRenames);
             RenameVirtualPropertyGroups(module, context, result, sameModuleRenames);
             RenameVirtualEventGroups(module, context, result, sameModuleRenames);
         }
@@ -249,7 +247,12 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             // 外部インターフェイス
             var resolved = iface.Interface.ResolveTypeDef();
             if (resolved == null)
-                return true; // 解決不能 → 安全のためスキップ
+            {
+                // 解決不能 → CLR 標準メソッド名の場合のみスキップ
+                if (IsWellKnownRuntimeMethodName(methodName))
+                    return true;
+                continue; // それ以外はドメイン固有とみなして続行
+            }
 
             if (resolved.Methods.Any(m =>
                 m.Name == methodName &&
@@ -286,7 +289,11 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             // 外部基底型
             var resolved = current.ResolveTypeDef();
             if (resolved == null)
-                return true; // 解決不能 → 安全のためスキップ
+            {
+                if (IsWellKnownRuntimeMethodName(methodName))
+                    return true;
+                break; // 解決不能だがドメイン固有メソッドなら続行
+            }
 
             if (resolved.Methods.Any(m =>
                 m.IsVirtual && m.Name == methodName &&
@@ -598,6 +605,18 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             if (baseTypeDef?.Events.Any(e => e.Name == evtName) == true) return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// CLR 標準のメソッド名（外部インターフェイスが解決不能な場合に安全のためスキップすべき名前）。
+    /// </summary>
+    private static bool IsWellKnownRuntimeMethodName(string name)
+    {
+        return name is "Dispose" or "GetEnumerator" or "MoveNext" or "Reset" or "get_Current"
+            or "Equals" or "GetHashCode" or "ToString" or "CompareTo" or "Clone"
+            or "GetObjectData" or "CopyTo" or "get_Count" or "get_Item" or "set_Item"
+            or "Add" or "Remove" or "Contains" or "Clear" or "IndexOf" or "Insert"
+            or "RemoveAt" or "GetType" or "Finalize";
     }
 
     private static void RenameParameters(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
