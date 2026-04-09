@@ -120,6 +120,9 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             // SpecialName (get_/set_ 等) はスキップ
             if (group.Any(m => m.IsSpecialName)) continue;
 
+            // ランタイム実装メソッド (デリゲートの Invoke/BeginInvoke/EndInvoke 等) はスキップ
+            if (group.Any(m => m.IsRuntime)) continue;
+
             // モジュール外インターフェイス (IDisposable, IEnumerable 等) を実装する
             // メソッドはリネーム不可（CLRが名前でマッチングするため）
             if (ImplementsExternalInterface(group, typeByFullName)) continue;
@@ -482,6 +485,8 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         if (method.IsSpecialName) return true;
         if (method.ImplMap != null) return true;
         if (method.IsPinvokeImpl) return true;
+        // ランタイム実装メソッド (デリゲートの Invoke 等)
+        if (method.IsRuntime) return true;
         return false;
     }
 
