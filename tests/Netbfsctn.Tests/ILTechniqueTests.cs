@@ -328,6 +328,151 @@ public class ILTechniqueTests : IDisposable
         Assert.True(File.Exists(outPath));
     }
 
+    // === Name Obfuscator - Public Type Handling ===
+
+    [Fact]
+    public void NameObfuscator_SkipsPublicTypes_WhenRenamePublicDisabled()
+    {
+        using var module = LoadSampleModule();
+        var options = new ObfuscationOptions
+        {
+            InputPath = "dummy.dll",
+            EnableRename = true,
+            EnableRenamePublic = false,
+            Verbose = true,
+        };
+        var logger = new ObfuscationLogger(verbose: true, quiet: false);
+        var context = new ObfuscationContext { Options = options, Logger = logger };
+        var result = new ObfuscationResult { Success = true };
+
+        var publicTypeNamesBefore = module.Types
+            .Where(t => (t.IsPublic || t.IsNestedPublic) && t.Name != "<Module>")
+            .Select(t => t.Name.String)
+            .ToHashSet();
+
+        new ILNameObfuscator().Apply(module, context, result);
+
+        // public 型はリネームされない
+        var publicTypeNamesAfter = module.Types
+            .Where(t => (t.IsPublic || t.IsNestedPublic) && t.Name != "<Module>")
+            .Select(t => t.Name.String)
+            .ToHashSet();
+
+        Assert.True(publicTypeNamesBefore.SetEquals(publicTypeNamesAfter),
+            "public型がリネームされてしまっている");
+    }
+
+    [Fact]
+    public void NameObfuscator_RenamesPublicTypes_WhenRenamePublicEnabled()
+    {
+        using var module = LoadSampleModule();
+        var options = new ObfuscationOptions
+        {
+            InputPath = "dummy.dll",
+            EnableRename = true,
+            EnableRenamePublic = true,
+            Verbose = true,
+        };
+        var logger = new ObfuscationLogger(verbose: true, quiet: false);
+        var context = new ObfuscationContext { Options = options, Logger = logger };
+        var result = new ObfuscationResult { Success = true };
+
+        new ILNameObfuscator().Apply(module, context, result);
+
+        // MemberRenameHistory にエントリが存在するはず
+        Assert.True(context.MemberRenameHistory.Count > 0,
+            "EnableRenamePublic=true でも MemberRenameHistory が空");
+        Assert.True(result.RenamedSymbols > 0);
+    }
+
+    [Fact]
+    public void NameObfuscator_PopulatesMemberRenameHistory_WhenRenamePublicEnabled()
+    {
+        using var module = LoadSampleModule();
+        var options = new ObfuscationOptions
+        {
+            InputPath = "dummy.dll",
+            EnableRename = true,
+            EnableRenamePublic = true,
+            Verbose = true,
+        };
+        var logger = new ObfuscationLogger(verbose: true, quiet: false);
+        var context = new ObfuscationContext { Options = options, Logger = logger };
+        var result = new ObfuscationResult { Success = true };
+
+        new ILNameObfuscator().Apply(module, context, result);
+
+        // MemberRenameHistory にもエントリが存在するはず
+        Assert.True(context.MemberRenameHistory.Count > 0,
+            "MemberRenameHistory が空");
+    }
+
+    [Fact]
+    public void NameObfuscator_RenamesMoreSymbols_WithRenamePublic()
+    {
+        // EnableRenamePublic のほうが多くのシンボルをリネームする
+        using var moduleA = LoadSampleModule();
+        var optionsA = new ObfuscationOptions
+        {
+            InputPath = "dummy.dll",
+            EnableRename = true,
+            Verbose = true,
+        };
+        var loggerA = new ObfuscationLogger(verbose: true, quiet: false);
+        var contextA = new ObfuscationContext { Options = optionsA, Logger = loggerA };
+        var resultA = new ObfuscationResult { Success = true };
+        new ILNameObfuscator().Apply(moduleA, contextA, resultA);
+
+        using var moduleB = LoadSampleModule();
+        var optionsB = new ObfuscationOptions
+        {
+            InputPath = "dummy.dll",
+            EnableRename = true,
+            EnableRenamePublic = true,
+            Verbose = true,
+        };
+        var loggerB = new ObfuscationLogger(verbose: true, quiet: false);
+        var contextB = new ObfuscationContext { Options = optionsB, Logger = loggerB };
+        var resultB = new ObfuscationResult { Success = true };
+        new ILNameObfuscator().Apply(moduleB, contextB, resultB);
+
+        Assert.True(resultB.RenamedSymbols > resultA.RenamedSymbols,
+            $"EnableRenamePublic のほうがリネーム数が多いはず: without={resultA.RenamedSymbols}, with={resultB.RenamedSymbols}");
+    }
+
+    [Fact]
+    public void NameObfuscator_SkipsPublicTypes_WhenExcluded()
+    {
+        using var module = LoadSampleModule();
+        var options = new ObfuscationOptions
+        {
+            InputPath = "dummy.dll",
+            EnableRename = true,
+            EnableRenamePublic = true,
+            Verbose = true,
+        };
+        var logger = new ObfuscationLogger(verbose: true, quiet: false);
+        var context = new ObfuscationContext { Options = options, Logger = logger };
+        // ExcludeRenamePublicModules に登録すると public リネームがスキップされる
+        context.ExcludeRenamePublicModules.Add(module.Assembly.Name.String);
+        var result = new ObfuscationResult { Success = true };
+
+        var publicTypeNamesBefore = module.Types
+            .Where(t => (t.IsPublic || t.IsNestedPublic) && t.Name != "<Module>")
+            .Select(t => t.Name.String)
+            .ToHashSet();
+
+        new ILNameObfuscator().Apply(module, context, result);
+
+        var publicTypeNamesAfter = module.Types
+            .Where(t => (t.IsPublic || t.IsNestedPublic) && t.Name != "<Module>")
+            .Select(t => t.Name.String)
+            .ToHashSet();
+
+        Assert.True(publicTypeNamesBefore.SetEquals(publicTypeNamesAfter),
+            "ExcludeRenamePublicModules に登録済みなのに public 型がリネームされた");
+    }
+
     // === 混合モード検出テスト ===
 
     [Fact]
