@@ -159,6 +159,43 @@ public class ILPipelineRuntimeTests : IDisposable
     }
 
     [Fact]
+    public void Obfuscated_NecroBit_RunsCorrectly()
+    {
+        if (!_sampleAvailable) return;
+
+        var outputDll = ObfuscateWithOptions(new ObfuscationOptions
+        {
+            InputPath = _sampleDll,
+            EnableRename = false,
+            EnableStringEncryption = false,
+            EnableControlFlow = false,
+            EnableDeadCode = false,
+            EnableNecroBit = true,
+        }, "necrobit");
+
+        AssertRunsCorrectly(outputDll);
+    }
+
+    [Fact]
+    public void Obfuscated_NecroBit_WithDeadCode_RunsCorrectly()
+    {
+        if (!_sampleAvailable) return;
+
+        // DeadCode injects dummy methods that NecroBit should be able to encrypt.
+        var outputDll = ObfuscateWithOptions(new ObfuscationOptions
+        {
+            InputPath = _sampleDll,
+            EnableRename = false,
+            EnableStringEncryption = false,
+            EnableControlFlow = false,
+            EnableDeadCode = true,
+            EnableNecroBit = true,
+        }, "necrobit_dc");
+
+        AssertRunsCorrectly(outputDll);
+    }
+
+    [Fact]
     public void Obfuscated_ResourceProtection_RunsCorrectly()
     {
         if (!_sampleAvailable) return;
