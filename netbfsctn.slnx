@@ -10,7 +10,7 @@
     <Project Path="tests/Netbfsctn.Benchmark.SampleApp/Netbfsctn.Benchmark.SampleApp.csproj" />
     <Project Path="tests/Netbfsctn.Benchmark/Netbfsctn.Benchmark.csproj" />
     <Project Path="tests/Netbfsctn.Tests.SampleWpfApp/Netbfsctn.Tests.SampleWpfApp.csproj" />
-    <Project Path="tests/Netbfsctn.Tests.SampleCppCli/Netbfsctn.Tests.SampleCppCli.vcxproj" />
+    <Project Path="tests/Netbfsctn.Tests.SampleCppCli/Netbfsctn.Tests.SampleCppCli.vcxproj" Id="8a1c42e7-3f5b-4d2a-9e6c-1b7d8f4a5c3e" />
     <Project Path="tests/Netbfsctn.Tests.CppCliHarness/Netbfsctn.Tests.CppCliHarness.csproj" />
   </Folder>
 </Solution>
