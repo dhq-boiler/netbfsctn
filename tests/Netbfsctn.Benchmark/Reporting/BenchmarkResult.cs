@@ -8,6 +8,8 @@ internal record BenchmarkResult(
     string? ObfuscationError,
     AnalysisResult? Analysis,
     bool CorrectnessPass,
-    double AvgRuntimeMs,
+    double MeanRuntimeMs,
+    double MedianRuntimeMs,
+    double StdDevMs,
     double RuntimeDeltaPercent,
     double SizeDeltaPercent);

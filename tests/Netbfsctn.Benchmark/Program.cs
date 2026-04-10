@@ -1,18 +1,26 @@
-using System.Diagnostics;
+using BenchmarkDotNet.Running;
 using Netbfsctn.Benchmark.Analysis;
+using Netbfsctn.Benchmark.Benchmarks;
 using Netbfsctn.Benchmark.Config;
 using Netbfsctn.Benchmark.Reporting;
 using Netbfsctn.Benchmark.Runners;
+
+// BenchmarkDotNet spawns child processes with special args — detect and skip setup
+if (args.Length > 0 && args.Any(a => a.StartsWith("--benchmarkDotNet") || a.StartsWith("--cli")))
+{
+    BenchmarkSwitcher.FromAssembly(typeof(RuntimeBenchmark).Assembly).Run(args);
+    return 0;
+}
 
 var repoRoot = FindRepoRoot();
 var workDir = Path.Combine(repoRoot, "tests", "Netbfsctn.Benchmark", "bin", "benchmark-work");
 Directory.CreateDirectory(workDir);
 
-Console.WriteLine("=== Netbfsctn Benchmark ===");
+Console.WriteLine("=== Netbfsctn Benchmark (BenchmarkDotNet) ===");
 Console.WriteLine();
 
 // Step 1: Build projects
-Console.WriteLine("[1/5] Building projects...");
+Console.WriteLine("[1/6] Building projects...");
 var buildCli = ProcessRunner.Run("dotnet", $"build \"{Path.Combine(repoRoot, "src", "Netbfsctn.Cli")}\" -c Release -v q --nologo");
 if (buildCli.ExitCode != 0) { Console.Error.WriteLine("Failed to build CLI:\n" + buildCli.StdErr); return 1; }
 
@@ -36,21 +44,22 @@ Console.WriteLine($"  SampleApp: {originalDll}");
 
 // Step 3: Baseline analysis
 Console.WriteLine();
-Console.WriteLine("[2/5] Analyzing baseline...");
+Console.WriteLine("[2/6] Analyzing baseline...");
 var baselineAnalysis = AssemblyAnalyzer.Analyze(originalDll);
 var baselineChecksum = GetChecksum(originalDll, originalRuntimeConfig);
-var baselineRuntime = MeasureRuntime(originalDll, originalRuntimeConfig);
 Console.WriteLine($"  Baseline checksum: {baselineChecksum}");
-Console.WriteLine($"  Baseline runtime: {baselineRuntime:F1}ms");
 
-var allResults = new List<BenchmarkResult>
-{
-    new("Baseline", true, null, baselineAnalysis, true, baselineRuntime, 0, 0)
-};
-
-// Step 4: Run scenarios
+// Step 4: Run obfuscation for all scenarios and collect analysis
 Console.WriteLine();
-Console.WriteLine($"[3/5] Running {ScenarioDefinitions.All.Length} scenarios...");
+Console.WriteLine($"[3/6] Running {ScenarioDefinitions.All.Length} obfuscation scenarios...");
+
+var scenarioPaths = new Dictionary<string, ScenarioPathInfo>();
+var scenarioData = new Dictionary<string, (AnalysisResult? Analysis, bool Correct, double SizeDelta)>();
+
+// Add baseline
+scenarioPaths["Baseline"] = new ScenarioPathInfo(originalDll, originalRuntimeConfig);
+scenarioData["Baseline"] = (baselineAnalysis, true, 0);
+
 int scenarioIdx = 0;
 foreach (var scenario in ScenarioDefinitions.All)
 {
@@ -75,7 +84,7 @@ foreach (var scenario in ScenarioDefinitions.All)
     {
         Console.WriteLine(" FAILED");
         var errorMsg = obfResult.StdErr.Length > 0 ? obfResult.StdErr.Trim() : obfResult.StdOut.Trim();
-        allResults.Add(new BenchmarkResult(scenario.Name, false, errorMsg, null, false, 0, 0, 0));
+        scenarioData[scenario.Name] = (null, false, 0);
         continue;
     }
 
@@ -91,29 +100,74 @@ foreach (var scenario in ScenarioDefinitions.All)
     var checksum = GetChecksum(outputDll, obfRuntimeConfig);
     bool correct = checksum == baselineChecksum;
 
-    // Runtime measurement
-    double runtime = 0;
-    double runtimeDelta = 0;
-    if (correct)
-    {
-        runtime = MeasureRuntime(outputDll, obfRuntimeConfig);
-        runtimeDelta = baselineRuntime > 0 ? (runtime - baselineRuntime) / baselineRuntime * 100 : 0;
-    }
-
     double sizeDelta = (double)(analysis.FileSizeBytes - baselineAnalysis.FileSizeBytes) / baselineAnalysis.FileSizeBytes * 100;
 
-    allResults.Add(new BenchmarkResult(scenario.Name, true, null, analysis, correct, runtime, runtimeDelta, sizeDelta));
+    scenarioPaths[scenario.Name] = new ScenarioPathInfo(outputDll, obfRuntimeConfig);
+    scenarioData[scenario.Name] = (analysis, correct, sizeDelta);
+
     Console.WriteLine($" OK (size: {sizeDelta:+0.0;-0.0}%, correct: {(correct ? "yes" : "NO")})");
 }
 
-// Step 5: Report
+// Step 5: Write config and run BenchmarkDotNet
 Console.WriteLine();
-Console.WriteLine("[4/5] Generating report...");
+Console.WriteLine("[4/6] Running BenchmarkDotNet...");
+RuntimeBenchmark.WriteConfig(scenarioPaths);
+Console.WriteLine($"  Config: {RuntimeBenchmark.GetConfigPath()}");
+
+var summary = BenchmarkRunner.Run<RuntimeBenchmark>();
+
+// Step 6: Merge results and generate report
+Console.WriteLine();
+Console.WriteLine("[5/6] Merging results...");
+
+var allResults = new List<BenchmarkResult>();
+
+// Extract BenchmarkDotNet results per scenario
+var bdnResults = new Dictionary<string, (double Mean, double Median, double StdDev)>();
+foreach (var report in summary.Reports)
+{
+    var scenarioName = report.BenchmarkCase.Parameters["Scenario"]?.ToString() ?? "";
+    if (report.ResultStatistics != null)
+    {
+        var stats = report.ResultStatistics;
+        // BenchmarkDotNet reports in nanoseconds by default
+        bdnResults[scenarioName] = (
+            Mean: stats.Mean / 1_000_000,
+            Median: stats.Median / 1_000_000,
+            StdDev: stats.StandardDeviation / 1_000_000
+        );
+    }
+}
+
+// Build baseline result
+var baselineBdn = bdnResults.GetValueOrDefault("Baseline");
+double baselineMean = baselineBdn.Mean;
+
+allResults.Add(new BenchmarkResult("Baseline", true, null, baselineAnalysis, true,
+    baselineBdn.Mean, baselineBdn.Median, baselineBdn.StdDev, 0, 0));
+
+foreach (var scenario in ScenarioDefinitions.All)
+{
+    var (analysis, correct, sizeDelta) = scenarioData.GetValueOrDefault(scenario.Name);
+    if (analysis == null)
+    {
+        allResults.Add(new BenchmarkResult(scenario.Name, false, "Obfuscation failed", null, false, 0, 0, 0, 0, 0));
+        continue;
+    }
+
+    var bdn = bdnResults.GetValueOrDefault(scenario.Name);
+    double runtimeDelta = baselineMean > 0 ? (bdn.Mean - baselineMean) / baselineMean * 100 : 0;
+
+    allResults.Add(new BenchmarkResult(scenario.Name, true, null, analysis, correct,
+        bdn.Mean, bdn.Median, bdn.StdDev, runtimeDelta, sizeDelta));
+}
+
+// Generate report
 ReportGenerator.PrintConsole(baselineAnalysis, allResults);
 
 var markdownPath = Path.Combine(repoRoot, "benchmark-results.md");
 ReportGenerator.WriteMarkdown(markdownPath, baselineAnalysis, allResults);
-Console.WriteLine($"[5/5] Markdown report saved to: {markdownPath}");
+Console.WriteLine($"[6/6] Markdown report saved to: {markdownPath}");
 
 return 0;
 
@@ -152,20 +206,4 @@ string? GetChecksum(string dllPath, string runtimeConfigPath)
     {
         return null;
     }
-}
-
-double MeasureRuntime(string dllPath, string runtimeConfigPath, int iterations = 5)
-{
-    var times = new List<double>();
-    for (int i = 0; i < iterations; i++)
-    {
-        try
-        {
-            var result = ProcessRunner.Run("dotnet", $"exec --runtimeconfig \"{runtimeConfigPath}\" \"{dllPath}\" --verify", timeoutMs: 30000);
-            if (result.ExitCode == 0)
-                times.Add(result.Elapsed.TotalMilliseconds);
-        }
-        catch { /* skip failed iterations */ }
-    }
-    return times.Count > 0 ? times.Average() : 0;
 }
