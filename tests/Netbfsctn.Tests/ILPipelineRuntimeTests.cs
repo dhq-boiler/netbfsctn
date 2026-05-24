@@ -214,6 +214,26 @@ public class ILPipelineRuntimeTests : IDisposable
     }
 
     [Fact]
+    public void Obfuscated_ResourceProtection_DecryptsAtRuntime()
+    {
+        if (!_sampleAvailable) return;
+
+        // ResourceProtector は GetManifestResourceStream 呼び出しを書き換えて
+        // 暗号化リソースを透過復号する必要がある。出力が baseline と完全一致するか確認。
+        var outputDll = ObfuscateWithOptions(new ObfuscationOptions
+        {
+            InputPath = _sampleDll,
+            EnableRename = false,
+            EnableStringEncryption = false,
+            EnableControlFlow = false,
+            EnableDeadCode = false,
+            EnableResourceProtection = true,
+        }, "res_protect_decrypt");
+
+        AssertOutputMatchesBaseline(outputDll);
+    }
+
+    [Fact]
     public void Obfuscated_FullPipeline_RunsCorrectly()
     {
         if (!_sampleAvailable) return;
@@ -483,6 +503,22 @@ public class ILPipelineRuntimeTests : IDisposable
         var result = RunDotnetExec(obfuscatedDll, runtimeConfig);
         Assert.True(result.ExitCode == 0,
             $"難読化後のアセンブリの実行に失敗 (exit code: {result.ExitCode})\nStdOut: {result.StdOut}\nStdErr: {result.StdErr}");
+    }
+
+    /// <summary>
+    /// 難読化後の標準出力が baseline (元アセンブリ実行結果) と完全一致することを検証する。
+    /// 単に exit code 0 を確認するだけでは "壊れたデータを返すが例外は出ない" 系のバグを見逃すため。
+    /// </summary>
+    private void AssertOutputMatchesBaseline(string obfuscatedDll)
+    {
+        var runtimeConfig = Path.ChangeExtension(obfuscatedDll, null) + ".runtimeconfig.json";
+        var obfResult = RunDotnetExec(obfuscatedDll, runtimeConfig);
+        Assert.Equal(0, obfResult.ExitCode);
+
+        var baselineResult = RunDotnetExec(_sampleDll, _runtimeConfig);
+        Assert.Equal(0, baselineResult.ExitCode);
+
+        Assert.Equal(baselineResult.StdOut, obfResult.StdOut);
     }
 
     private static (int ExitCode, string StdOut, string StdErr) RunDotnetExec(string dllPath, string runtimeConfigPath)
