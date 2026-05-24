@@ -40,6 +40,7 @@ public class ObfuscationOptions
     public string? MappingFilePath { get; init; }
     public bool EnableResourceProtection { get; init; }
     public bool EnableCodeVirtualization { get; init; }
+    public bool EnableMixedBooleanArithmetic { get; init; }
 
     // public リネーム除外アセンブリ名
     public string[] ExcludeRenamePublic { get; init; } = [];

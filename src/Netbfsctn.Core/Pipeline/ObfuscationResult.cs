@@ -19,4 +19,5 @@ public class ObfuscationResult
     public string? MappingFilePath { get; set; }
     public int ProtectedResources { get; set; }
     public int VirtualizedMethods { get; set; }
+    public int MbaTransformations { get; set; }
 }

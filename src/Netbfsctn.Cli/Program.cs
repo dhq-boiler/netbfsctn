@@ -118,6 +118,11 @@ var virtualizeOption = new Option<bool>("--virtualize")
     Description = "メソッドをカスタム VM バイトコードに変換"
 };
 
+var mbaOption = new Option<bool>("--mba")
+{
+    Description = "Mixed Boolean-Arithmetic 変換 (算術命令を恒等式で意味等価に置換)"
+};
+
 var excludeRenamePublicOption = new Option<string[]>("--exclude-rename-public")
 {
     Description = "public リネームから除外するアセンブリ名 (複数指定可)",
@@ -166,6 +171,7 @@ rootCommand.Options.Add(hideCallsOption);
 rootCommand.Options.Add(mappingFileOption);
 rootCommand.Options.Add(protectResourcesOption);
 rootCommand.Options.Add(virtualizeOption);
+rootCommand.Options.Add(mbaOption);
 rootCommand.Options.Add(excludeRenamePublicOption);
 rootCommand.Options.Add(additionalInputOption);
 rootCommand.Options.Add(additionalOutputOption);
@@ -196,6 +202,7 @@ rootCommand.SetAction(parseResult =>
     var mappingFile = parseResult.GetValue(mappingFileOption);
     var protectResources = parseResult.GetValue(protectResourcesOption);
     var virtualize = parseResult.GetValue(virtualizeOption);
+    var mba = parseResult.GetValue(mbaOption);
     var excludeRenamePublic = parseResult.GetValue(excludeRenamePublicOption) ?? [];
     var additionalInputs = parseResult.GetValue(additionalInputOption) ?? [];
     var additionalOutputs = parseResult.GetValue(additionalOutputOption) ?? [];
@@ -235,6 +242,7 @@ rootCommand.SetAction(parseResult =>
         MappingFilePath = mappingFile,
         EnableResourceProtection = protectResources,
         EnableCodeVirtualization = virtualize,
+        EnableMixedBooleanArithmetic = mba,
         AdditionalInputPaths = additionalInputs,
         AdditionalOutputPaths = additionalOutputs,
         XamlDirectories = xamlDirs

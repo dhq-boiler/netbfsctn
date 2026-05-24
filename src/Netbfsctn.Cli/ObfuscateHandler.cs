@@ -76,6 +76,8 @@ public static class ObfuscateHandler
                 logger.Info($"  リソース保護: {result.ProtectedResources} リソース");
             if (result.VirtualizedMethods > 0)
                 logger.Info($"  仮想化: {result.VirtualizedMethods} メソッド");
+            if (result.MbaTransformations > 0)
+                logger.Info($"  MBA変換: {result.MbaTransformations} 箇所");
             return 0;
         }
 

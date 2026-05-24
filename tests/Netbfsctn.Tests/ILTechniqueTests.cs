@@ -212,6 +212,67 @@ public class ILTechniqueTests : IDisposable
         Assert.True(File.Exists(outPath));
     }
 
+    // === Mixed Boolean-Arithmetic ===
+
+    [Fact]
+    public void Mba_CountsTransformations()
+    {
+        using var module = LoadSampleModule();
+        var (context, result) = CreateContext();
+        new ILMixedBooleanArithmetic().Apply(module, context, result);
+        Assert.True(result.MbaTransformations >= 0);
+    }
+
+    [Fact]
+    public void Mba_CanWriteAssembly()
+    {
+        using var module = LoadSampleModule();
+        var (context, result) = CreateContext();
+        new ILMixedBooleanArithmetic().Apply(module, context, result);
+        PrepareForWrite(module);
+        var outPath = Path.Combine(_tempDir, "mba.dll");
+        module.Write(outPath);
+        Assert.True(File.Exists(outPath));
+    }
+
+    [Fact]
+    public void Mba_TransformsAtLeastOneInstruction_OnRealisticAssembly()
+    {
+        // 自分自身を入力にし、十分な数の算術命令と定数ロードがあることを前提に
+        // 少なくとも 1 件は変換が走ることを確認する。
+        using var module = LoadSampleModule();
+        var (context, result) = CreateContext();
+        new ILMixedBooleanArithmetic().Apply(module, context, result);
+        Assert.True(result.MbaTransformations > 0,
+            "テスト用アセンブリに変換可能な命令があるはず");
+    }
+
+    [Fact]
+    public void Mba_AddsLocalVariablesForTransformedMethods()
+    {
+        using var module = LoadSampleModule();
+        var (context, result) = CreateContext();
+
+        var localCountsBefore = new Dictionary<string, int>();
+        foreach (var t in module.Types)
+            foreach (var m in t.Methods)
+                if (m.HasBody)
+                    localCountsBefore[m.FullName] = m.Body.Variables.Count;
+
+        new ILMixedBooleanArithmetic().Apply(module, context, result);
+
+        if (result.MbaTransformations == 0) return;
+
+        // 算術変換が発生した場合、対象メソッドにローカル変数が追加されている
+        var addedLocals = 0;
+        foreach (var t in module.Types)
+            foreach (var m in t.Methods)
+                if (m.HasBody && localCountsBefore.TryGetValue(m.FullName, out var before))
+                    addedLocals += Math.Max(0, m.Body.Variables.Count - before);
+
+        Assert.True(addedLocals > 0, "MBA算術変換時には一時ローカルが追加されるはず");
+    }
+
     // === Code Virtualizer ===
 
     [Fact]

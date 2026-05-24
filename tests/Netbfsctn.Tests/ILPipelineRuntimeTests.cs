@@ -233,6 +233,64 @@ public class ILPipelineRuntimeTests : IDisposable
         AssertRunsCorrectly(outputDll);
     }
 
+    [Fact]
+    public void Obfuscated_MbaOnly_RunsCorrectly()
+    {
+        if (!_sampleAvailable) return;
+
+        var outputDll = ObfuscateWithOptions(new ObfuscationOptions
+        {
+            InputPath = _sampleDll,
+            EnableRename = false,
+            EnableStringEncryption = false,
+            EnableControlFlow = false,
+            EnableDeadCode = false,
+            EnableMixedBooleanArithmetic = true,
+        }, "mba_only");
+
+        AssertRunsCorrectly(outputDll);
+    }
+
+    [Fact]
+    public void Obfuscated_MbaWithDeadCode_RunsCorrectly()
+    {
+        if (!_sampleAvailable) return;
+
+        var outputDll = ObfuscateWithOptions(new ObfuscationOptions
+        {
+            InputPath = _sampleDll,
+            EnableRename = false,
+            EnableStringEncryption = false,
+            EnableControlFlow = false,
+            EnableDeadCode = true,
+            EnableMixedBooleanArithmetic = true,
+        }, "mba_dc");
+
+        AssertRunsCorrectly(outputDll);
+    }
+
+    [Fact]
+    public void Obfuscated_MbaWithNecroBitAndVirtualize_RunsCorrectly()
+    {
+        if (!_sampleAvailable) return;
+
+        // MBA は helper 注入技法より前に実行されるため、NecroBit / Virtualize が
+        // 注入したヘルパーメソッドの IL は破壊されないことを確認する。
+        var outputDll = ObfuscateWithOptions(new ObfuscationOptions
+        {
+            InputPath = _sampleDll,
+            EnableRename = false,
+            EnableStringEncryption = false,
+            EnableControlFlow = false,
+            EnableDeadCode = false,
+            EnableNecroBit = true,
+            EnableCodeVirtualization = true,
+            EnableMixedBooleanArithmetic = true,
+        }, "mba_necrobit_vm");
+
+        AssertRunsCorrectly(outputDll);
+    }
+
     /// <summary>
     /// ユーザー報告の再現ケース: --no-rename --rename-fields --protect-resources --anti-debug --anti-tamper
     /// </summary>
@@ -290,6 +348,7 @@ public class ILPipelineRuntimeTests : IDisposable
             EnableNecroBit = baseOptions.EnableNecroBit,
             EnableHideMethodCalls = baseOptions.EnableHideMethodCalls,
             EnableCodeVirtualization = baseOptions.EnableCodeVirtualization,
+            EnableMixedBooleanArithmetic = baseOptions.EnableMixedBooleanArithmetic,
             Verbose = true,
         };
 

@@ -421,6 +421,11 @@ public class ILObfuscationPipeline : IObfuscationPipeline
         if (options.EnableDeadCode)
             techniques.Add(new ILDeadCodeInserter());
 
+        // MBA: ヘルパー注入技法 (NecroBit/HideCalls/Virtualizer) より前に実行。
+        // 後段で注入されたヘルパーメソッドの IL を破壊するのを避けるため。
+        if (options.EnableMixedBooleanArithmetic)
+            techniques.Add(new ILMixedBooleanArithmetic());
+
         // 追加テクニック (適用順序に従って登録)
         if (options.EnableAntiIldasm)
             techniques.Add(new ILAntiIldasm());
