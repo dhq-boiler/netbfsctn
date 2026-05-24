@@ -159,6 +159,89 @@ public class ILPipelineRuntimeTests : IDisposable
     }
 
     [Fact]
+    public void Obfuscated_AntiTamper_OutputMatchesBaseline()
+    {
+        if (!_sampleAvailable) return;
+
+        // AntiTampering の構造ハッシュ計算 (obfuscation 側) と runtime 検証 (注入 IL 側) が
+        // 一致せず偽陽性で FailFast すると exit code は 0 のままなので、stdout 一致まで確認する。
+        var outputDll = ObfuscateWithOptions(new ObfuscationOptions
+        {
+            InputPath = _sampleDll,
+            EnableRename = false,
+            EnableStringEncryption = false,
+            EnableControlFlow = false,
+            EnableDeadCode = false,
+            EnableAntiTampering = true,
+        }, "anti_tamper_match");
+
+        AssertOutputMatchesBaseline(outputDll);
+    }
+
+    [Fact]
+    public void Obfuscated_AntiTamper_DetectsAddedMethod()
+    {
+        if (!_sampleAvailable) return;
+
+        // AntiTampering を有効にした後、dnlib で新規メソッドを追加して改ざんし、
+        // 実行時に FailFast が発火することを確認する。
+        var outputDll = ObfuscateWithOptions(new ObfuscationOptions
+        {
+            InputPath = _sampleDll,
+            EnableRename = false,
+            EnableStringEncryption = false,
+            EnableControlFlow = false,
+            EnableDeadCode = false,
+            EnableAntiTampering = true,
+        }, "anti_tamper_detect");
+
+        // 改ざん版は同じディレクトリに置くと .NET runtime が同 assembly identity の
+        // 別ファイルを resolve してしまい check method が無効化される。隔離 dir に書く。
+        var tamperedDir = Path.Combine(_tempDir, "anti_tamper_detect_isolated");
+        Directory.CreateDirectory(tamperedDir);
+        var tamperedDll = Path.Combine(tamperedDir, Path.GetFileName(outputDll));
+
+        using (var module = dnlib.DotNet.ModuleDefMD.Load(outputDll))
+        {
+            var targetType = module.GetTypes()
+                .FirstOrDefault(t => t.FullName == "Netbfsctn.Benchmark.SampleApp.Models.Order");
+            Assert.NotNull(targetType);
+
+            var newMethod = new dnlib.DotNet.MethodDefUser(
+                "TamperedMethod",
+                dnlib.DotNet.MethodSig.CreateInstance(module.CorLibTypes.Void),
+                dnlib.DotNet.MethodImplAttributes.IL | dnlib.DotNet.MethodImplAttributes.Managed,
+                dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.HideBySig);
+            var b = new dnlib.DotNet.Emit.CilBody();
+            b.Instructions.Add(new dnlib.DotNet.Emit.Instruction(dnlib.DotNet.Emit.OpCodes.Ret));
+            newMethod.Body = b;
+            targetType.Methods.Add(newMethod);
+
+            module.Write(tamperedDll);
+        }
+
+        // runtimeconfig と deps.json を隔離 dir にもコピー
+        var srcDir = Path.GetDirectoryName(outputDll)!;
+        var rcName = Path.GetFileNameWithoutExtension(outputDll) + ".runtimeconfig.json";
+        var depsName = Path.GetFileNameWithoutExtension(outputDll) + ".deps.json";
+        var origRc = Path.Combine(srcDir, rcName);
+        var origDeps = Path.Combine(srcDir, depsName);
+        if (File.Exists(origRc)) File.Copy(origRc, Path.Combine(tamperedDir, rcName), true);
+        if (File.Exists(origDeps)) File.Copy(origDeps, Path.Combine(tamperedDir, depsName), true);
+        var tamperedRc = Path.Combine(tamperedDir, rcName);
+
+        var result = RunDotnetExec(tamperedDll, tamperedRc);
+
+        // Environment.FailFast は Windows では exit code 0 のままになることがあるが、
+        // stderr/stdout に "Process terminated" / "FailFast" メッセージが出る。
+        // 通常出力 (Customer: Taro... 等) は出ないことも合わせて確認する。
+        var combined = result.StdOut + result.StdErr;
+        Assert.True(combined.Contains("FailFast"),
+            $"FailFast expected, got:\nExit={result.ExitCode}\nStdOut={result.StdOut}\nStdErr={result.StdErr}\nTamperedDll={tamperedDll}");
+        Assert.DoesNotContain("Customer: Taro Yamada", combined);
+    }
+
+    [Fact]
     public void Obfuscated_NecroBit_RunsCorrectly()
     {
         if (!_sampleAvailable) return;
