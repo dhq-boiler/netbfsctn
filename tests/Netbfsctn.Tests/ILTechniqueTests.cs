@@ -273,6 +273,56 @@ public class ILTechniqueTests : IDisposable
         Assert.True(addedLocals > 0, "MBA算術変換時には一時ローカルが追加されるはず");
     }
 
+    // === Dynamic Opaque Predicates ===
+
+    [Fact]
+    public void DynamicOpaque_CountsInsertions()
+    {
+        using var module = LoadSampleModule();
+        var (context, result) = CreateContext();
+        new ILDynamicOpaquePredicates().Apply(module, context, result);
+        Assert.True(result.DynamicOpaquePredicates >= 0);
+    }
+
+    [Fact]
+    public void DynamicOpaque_InjectsHelperType()
+    {
+        using var module = LoadSampleModule();
+        var (context, result) = CreateContext();
+        new ILDynamicOpaquePredicates().Apply(module, context, result);
+
+        // ヘルパー型 (空Namespace + ゼロ幅文字名) に T フィールドと K メソッドがあるはず
+        var helperType = module.Types.FirstOrDefault(
+            t => t.Fields.Any(f => f.Name == "T") &&
+                 t.Methods.Any(m => m.Name == "K"));
+        Assert.NotNull(helperType);
+    }
+
+    [Fact]
+    public void DynamicOpaque_HelperHasStaticConstructor()
+    {
+        using var module = LoadSampleModule();
+        var (context, result) = CreateContext();
+        new ILDynamicOpaquePredicates().Apply(module, context, result);
+
+        var helperType = module.Types.FirstOrDefault(
+            t => t.Methods.Any(m => m.Name == "K"));
+        Assert.NotNull(helperType);
+        Assert.NotNull(helperType.FindStaticConstructor());
+    }
+
+    [Fact]
+    public void DynamicOpaque_CanWriteAssembly()
+    {
+        using var module = LoadSampleModule();
+        var (context, result) = CreateContext();
+        new ILDynamicOpaquePredicates().Apply(module, context, result);
+        PrepareForWrite(module);
+        var outPath = Path.Combine(_tempDir, "dynamic_opaque.dll");
+        module.Write(outPath);
+        Assert.True(File.Exists(outPath));
+    }
+
     // === Code Virtualizer ===
 
     [Fact]

@@ -20,4 +20,5 @@ public class ObfuscationResult
     public int ProtectedResources { get; set; }
     public int VirtualizedMethods { get; set; }
     public int MbaTransformations { get; set; }
+    public int DynamicOpaquePredicates { get; set; }
 }

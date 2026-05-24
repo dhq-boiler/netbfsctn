@@ -426,6 +426,11 @@ public class ILObfuscationPipeline : IObfuscationPipeline
         if (options.EnableMixedBooleanArithmetic)
             techniques.Add(new ILMixedBooleanArithmetic());
 
+        // 動的不透明述語: ヘルパー注入技法より前に実行。挿入された predicate IL を
+        // 後段の MBA/NecroBit/Virtualize でさらに難読化できる。
+        if (options.EnableDynamicOpaquePredicates)
+            techniques.Add(new ILDynamicOpaquePredicates());
+
         // 追加テクニック (適用順序に従って登録)
         if (options.EnableAntiIldasm)
             techniques.Add(new ILAntiIldasm());

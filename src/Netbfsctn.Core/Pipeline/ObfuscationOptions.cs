@@ -41,6 +41,7 @@ public class ObfuscationOptions
     public bool EnableResourceProtection { get; init; }
     public bool EnableCodeVirtualization { get; init; }
     public bool EnableMixedBooleanArithmetic { get; init; }
+    public bool EnableDynamicOpaquePredicates { get; init; }
 
     // public リネーム除外アセンブリ名
     public string[] ExcludeRenamePublic { get; init; } = [];

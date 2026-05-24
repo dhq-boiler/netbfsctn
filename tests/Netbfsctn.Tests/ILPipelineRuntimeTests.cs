@@ -291,6 +291,46 @@ public class ILPipelineRuntimeTests : IDisposable
         AssertRunsCorrectly(outputDll);
     }
 
+    [Fact]
+    public void Obfuscated_DynamicOpaqueOnly_RunsCorrectly()
+    {
+        if (!_sampleAvailable) return;
+
+        var outputDll = ObfuscateWithOptions(new ObfuscationOptions
+        {
+            InputPath = _sampleDll,
+            EnableRename = false,
+            EnableStringEncryption = false,
+            EnableControlFlow = false,
+            EnableDeadCode = false,
+            EnableDynamicOpaquePredicates = true,
+        }, "dop_only");
+
+        AssertRunsCorrectly(outputDll);
+    }
+
+    [Fact]
+    public void Obfuscated_AllPhase123_RunsCorrectly()
+    {
+        if (!_sampleAvailable) return;
+
+        // Phase 1/2/3 の3つの新技法 + NecroBit + Virtualize の組み合わせ
+        var outputDll = ObfuscateWithOptions(new ObfuscationOptions
+        {
+            InputPath = _sampleDll,
+            EnableRename = false,
+            EnableStringEncryption = false,
+            EnableControlFlow = false,
+            EnableDeadCode = false,
+            EnableMixedBooleanArithmetic = true,
+            EnableDynamicOpaquePredicates = true,
+            EnableNecroBit = true,
+            EnableCodeVirtualization = true,
+        }, "phase123");
+
+        AssertRunsCorrectly(outputDll);
+    }
+
     /// <summary>
     /// ユーザー報告の再現ケース: --no-rename --rename-fields --protect-resources --anti-debug --anti-tamper
     /// </summary>
@@ -349,6 +389,7 @@ public class ILPipelineRuntimeTests : IDisposable
             EnableHideMethodCalls = baseOptions.EnableHideMethodCalls,
             EnableCodeVirtualization = baseOptions.EnableCodeVirtualization,
             EnableMixedBooleanArithmetic = baseOptions.EnableMixedBooleanArithmetic,
+            EnableDynamicOpaquePredicates = baseOptions.EnableDynamicOpaquePredicates,
             Verbose = true,
         };
 

@@ -123,6 +123,11 @@ var mbaOption = new Option<bool>("--mba")
     Description = "Mixed Boolean-Arithmetic 変換 (算術命令を恒等式で意味等価に置換)"
 };
 
+var dynamicOpaqueOption = new Option<bool>("--dynamic-opaque")
+{
+    Description = "動的不透明述語 (ヘルパー関数呼び出しベースの常に false な述語) を挿入"
+};
+
 var excludeRenamePublicOption = new Option<string[]>("--exclude-rename-public")
 {
     Description = "public リネームから除外するアセンブリ名 (複数指定可)",
@@ -172,6 +177,7 @@ rootCommand.Options.Add(mappingFileOption);
 rootCommand.Options.Add(protectResourcesOption);
 rootCommand.Options.Add(virtualizeOption);
 rootCommand.Options.Add(mbaOption);
+rootCommand.Options.Add(dynamicOpaqueOption);
 rootCommand.Options.Add(excludeRenamePublicOption);
 rootCommand.Options.Add(additionalInputOption);
 rootCommand.Options.Add(additionalOutputOption);
@@ -203,6 +209,7 @@ rootCommand.SetAction(parseResult =>
     var protectResources = parseResult.GetValue(protectResourcesOption);
     var virtualize = parseResult.GetValue(virtualizeOption);
     var mba = parseResult.GetValue(mbaOption);
+    var dynamicOpaque = parseResult.GetValue(dynamicOpaqueOption);
     var excludeRenamePublic = parseResult.GetValue(excludeRenamePublicOption) ?? [];
     var additionalInputs = parseResult.GetValue(additionalInputOption) ?? [];
     var additionalOutputs = parseResult.GetValue(additionalOutputOption) ?? [];
@@ -243,6 +250,7 @@ rootCommand.SetAction(parseResult =>
         EnableResourceProtection = protectResources,
         EnableCodeVirtualization = virtualize,
         EnableMixedBooleanArithmetic = mba,
+        EnableDynamicOpaquePredicates = dynamicOpaque,
         AdditionalInputPaths = additionalInputs,
         AdditionalOutputPaths = additionalOutputs,
         XamlDirectories = xamlDirs
