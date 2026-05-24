@@ -5,6 +5,35 @@ namespace Netbfsctn.IL.VM;
 
 public class CilToVmTranslator
 {
+    /// <summary>
+    /// VM インタプリタ (<see cref="VmInterpreterInjector"/>) が実際にディスパッチできる
+    /// CIL opcode のみを許容する。これに含まれない opcode を 1 つでも持つメソッドは
+    /// 翻訳拒否 (Translate が null を返す) し、virtualizer 側でスキップさせる。
+    ///
+    /// このフィルタが無いと、interpreter が知らない opcode は default に落ち、
+    /// オペランド付き opcode の場合は読み込み位置がずれて bytecode 全体を破壊する。
+    /// (例: NecroBit スタブの NEWARR + CALL を翻訳すると runtime で stack 例外。)
+    /// </summary>
+    private static readonly HashSet<Code> SupportedCilOpcodes =
+    [
+        Code.Nop,
+        Code.Add, Code.Sub, Code.Mul,
+        Code.Ldc_I4, Code.Ldc_I4_S,
+        Code.Ldc_I4_0, Code.Ldc_I4_1, Code.Ldc_I4_2, Code.Ldc_I4_3,
+        Code.Ldc_I4_4, Code.Ldc_I4_5, Code.Ldc_I4_6, Code.Ldc_I4_7,
+        Code.Ldc_I4_8, Code.Ldc_I4_M1,
+        Code.Ldstr,
+        Code.Ldloc, Code.Ldloc_S,
+        Code.Ldloc_0, Code.Ldloc_1, Code.Ldloc_2, Code.Ldloc_3,
+        Code.Stloc, Code.Stloc_S,
+        Code.Stloc_0, Code.Stloc_1, Code.Stloc_2, Code.Stloc_3,
+        Code.Ldarg, Code.Ldarg_S,
+        Code.Ldarg_0, Code.Ldarg_1, Code.Ldarg_2, Code.Ldarg_3,
+        Code.Br, Code.Br_S,
+        Code.Pop,
+        Code.Ret
+    ];
+
     private readonly ModuleDef _module;
     private readonly VmIsa _isa;
     private readonly List<IFullName> _metadataTokenTable = [];
@@ -20,6 +49,13 @@ public class CilToVmTranslator
     public byte[]? Translate(MethodDef method)
     {
         if (!method.HasBody) return null;
+
+        // 事前スキャン: VM インタプリタがディスパッチできない opcode が 1 つでも含まれていれば翻訳拒否
+        foreach (var instr in method.Body.Instructions)
+        {
+            if (!SupportedCilOpcodes.Contains(instr.OpCode.Code))
+                return null;
+        }
 
         using var ms = new MemoryStream();
         using var writer = new BinaryWriter(ms);

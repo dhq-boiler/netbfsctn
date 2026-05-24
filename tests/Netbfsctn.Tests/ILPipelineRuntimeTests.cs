@@ -292,6 +292,72 @@ public class ILPipelineRuntimeTests : IDisposable
     }
 
     [Fact]
+    public void Obfuscated_VirtualizeOnly_RunsCorrectly()
+    {
+        if (!_sampleAvailable) return;
+
+        // Virtualize 単独: 翻訳できないメソッドはスキップされ、翻訳されたものだけが
+        // VM 実行に回るため、stack 例外などの runtime エラーが発生しないこと。
+        var outputDll = ObfuscateWithOptions(new ObfuscationOptions
+        {
+            InputPath = _sampleDll,
+            EnableRename = false,
+            EnableStringEncryption = false,
+            EnableControlFlow = false,
+            EnableDeadCode = false,
+            EnableCodeVirtualization = true,
+        }, "vm_only");
+
+        AssertRunsCorrectly(outputDll);
+    }
+
+    [Fact]
+    public void Obfuscated_NecroBitWithVirtualize_RunsCorrectly()
+    {
+        if (!_sampleAvailable) return;
+
+        // NecroBit スタブ (Newarr + Call + Unbox_Any) は VM 非対応 opcode を含むので
+        // 翻訳が拒否され、Virtualize がスキップする。両方同時に有効でも壊れないこと。
+        var outputDll = ObfuscateWithOptions(new ObfuscationOptions
+        {
+            InputPath = _sampleDll,
+            EnableRename = false,
+            EnableStringEncryption = false,
+            EnableControlFlow = false,
+            EnableDeadCode = false,
+            EnableNecroBit = true,
+            EnableCodeVirtualization = true,
+        }, "necrobit_vm");
+
+        AssertRunsCorrectly(outputDll);
+    }
+
+    [Fact]
+    public void Obfuscated_AllOptOutFeatures_RunsCorrectly()
+    {
+        if (!_sampleAvailable) return;
+
+        // README にある "Full protection" 構成。全 opt-in 機能を併用しても壊れないこと。
+        var outputDll = ObfuscateWithOptions(new ObfuscationOptions
+        {
+            InputPath = _sampleDll,
+            EnableRename = true,
+            EnableStringEncryption = true,
+            EnableControlFlow = true,
+            EnableDeadCode = true,
+            EnableAntiIldasm = true,
+            EnableAntiDebug = true,
+            EnableAntiTampering = true,
+            EnableNecroBit = true,
+            EnableHideMethodCalls = true,
+            EnableCodeVirtualization = true,
+            EnableResourceProtection = true,
+        }, "full_optin");
+
+        AssertRunsCorrectly(outputDll);
+    }
+
+    [Fact]
     public void Obfuscated_DynamicOpaqueOnly_RunsCorrectly()
     {
         if (!_sampleAvailable) return;
