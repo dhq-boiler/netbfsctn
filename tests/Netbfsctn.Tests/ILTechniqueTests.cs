@@ -305,13 +305,80 @@ public class ILTechniqueTests : IDisposable
         Assert.Equal(0xFF, (byte)IL.VM.VmOpCode.NOP);
     }
 
+    // === VmIsa (per-session ISA randomization) ===
+
+    [Fact]
+    public void VmIsa_AssignsUniqueByteToEachEncoding()
+    {
+        var isa = new IL.VM.VmIsa(seed: 12345);
+        var allBytes = new List<byte>();
+        foreach (var op in Enum.GetValues<IL.VM.VmOpCode>())
+        {
+            var encodings = isa.GetAllEncodings(op);
+            allBytes.AddRange(encodings);
+        }
+        Assert.Equal(allBytes.Count, allBytes.Distinct().Count());
+    }
+
+    [Fact]
+    public void VmIsa_DifferentSeedsProduceDifferentMappings()
+    {
+        var isa1 = new IL.VM.VmIsa(seed: 1);
+        var isa2 = new IL.VM.VmIsa(seed: 2);
+        Assert.NotEqual(
+            isa1.GetAllEncodings(IL.VM.VmOpCode.ADD)[0],
+            isa2.GetAllEncodings(IL.VM.VmOpCode.ADD)[0]);
+    }
+
+    [Fact]
+    public void VmIsa_PolymorphicOpsHaveMultipleEncodings()
+    {
+        var isa = new IL.VM.VmIsa(seed: 42);
+        Assert.True(isa.GetAllEncodings(IL.VM.VmOpCode.ADD).Count >= 2);
+        Assert.True(isa.GetAllEncodings(IL.VM.VmOpCode.LDC_I4).Count >= 2);
+        Assert.True(isa.GetAllEncodings(IL.VM.VmOpCode.LDLOC).Count >= 2);
+    }
+
+    [Fact]
+    public void VmIsa_NonPolymorphicOpsHaveSingleEncoding()
+    {
+        var isa = new IL.VM.VmIsa(seed: 42);
+        Assert.Single(isa.GetAllEncodings(IL.VM.VmOpCode.RET));
+        Assert.Single(isa.GetAllEncodings(IL.VM.VmOpCode.NOP));
+        Assert.Single(isa.GetAllEncodings(IL.VM.VmOpCode.BR));
+    }
+
+    [Fact]
+    public void VmIsa_PickEncodingReturnsValuesFromAllowedSet()
+    {
+        var isa = new IL.VM.VmIsa(seed: 42);
+        var allowed = new HashSet<byte>(isa.GetAllEncodings(IL.VM.VmOpCode.ADD));
+        for (var i = 0; i < 100; i++)
+        {
+            var pick = isa.PickEncoding(IL.VM.VmOpCode.ADD);
+            Assert.Contains(pick, allowed);
+        }
+    }
+
+    [Fact]
+    public void VmIsa_PolymorphicPickEventuallyReturnsAllEncodings()
+    {
+        // 十分な回数 PickEncoding を呼べば、全エンコーディングが少なくとも 1 回返るはず
+        var isa = new IL.VM.VmIsa(seed: 42);
+        var allowed = isa.GetAllEncodings(IL.VM.VmOpCode.ADD).ToList();
+        var seen = new HashSet<byte>();
+        for (var i = 0; i < 200 && seen.Count < allowed.Count; i++)
+            seen.Add(isa.PickEncoding(IL.VM.VmOpCode.ADD));
+        Assert.Equal(allowed.Count, seen.Count);
+    }
+
     // === CilToVmTranslator ===
 
     [Fact]
     public void CilToVmTranslator_TranslatesSimpleMethod()
     {
         using var module = LoadSampleModule();
-        var translator = new IL.VM.CilToVmTranslator(module);
+        var translator = new IL.VM.CilToVmTranslator(module, new IL.VM.VmIsa(seed: 42));
 
         foreach (var type in module.Types)
         {

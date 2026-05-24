@@ -16,11 +16,16 @@ public class ILCodeVirtualizer : IObfuscationTechnique<ModuleDef>
     public void Apply(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
     {
         var importer = new Importer(module);
+
+        // 難読化セッション毎にランダムな opcode マッピングを生成する。
+        // 同一モジュール内では translator と injector が同じ ISA を共有する必要がある。
+        var isa = new VmIsa(module.Name.GetHashCode() ^ 0x7C0DE);
+
         var injector = new VmInterpreterInjector();
-        var interpreterType = injector.InjectInterpreter(module);
+        var interpreterType = injector.InjectInterpreter(module, isa);
         var executeMethod = interpreterType.Methods.First(m => m.Name == "E");
 
-        var translator = new CilToVmTranslator(module);
+        var translator = new CilToVmTranslator(module, isa);
         var virtualizedData = new Dictionary<int, byte[]>();
         var methodId = 0;
 

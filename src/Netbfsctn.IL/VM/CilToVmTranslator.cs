@@ -6,11 +6,13 @@ namespace Netbfsctn.IL.VM;
 public class CilToVmTranslator
 {
     private readonly ModuleDef _module;
+    private readonly VmIsa _isa;
     private readonly List<IFullName> _metadataTokenTable = [];
 
-    public CilToVmTranslator(ModuleDef module)
+    public CilToVmTranslator(ModuleDef module, VmIsa isa)
     {
         _module = module;
+        _isa = isa;
     }
 
     public List<IFullName> MetadataTokenTable => _metadataTokenTable;
@@ -37,39 +39,39 @@ public class CilToVmTranslator
             switch (instr.OpCode.Code)
             {
                 case Code.Add:
-                    writer.Write((byte)VmOpCode.ADD);
+                    Write(writer, VmOpCode.ADD);
                     break;
                 case Code.Sub:
-                    writer.Write((byte)VmOpCode.SUB);
+                    Write(writer, VmOpCode.SUB);
                     break;
                 case Code.Mul:
-                    writer.Write((byte)VmOpCode.MUL);
+                    Write(writer, VmOpCode.MUL);
                     break;
                 case Code.Div or Code.Div_Un:
-                    writer.Write((byte)VmOpCode.DIV);
+                    Write(writer, VmOpCode.DIV);
                     break;
                 case Code.Rem or Code.Rem_Un:
-                    writer.Write((byte)VmOpCode.REM);
+                    Write(writer, VmOpCode.REM);
                     break;
                 case Code.Neg:
-                    writer.Write((byte)VmOpCode.NEG);
+                    Write(writer, VmOpCode.NEG);
                     break;
                 case Code.Ceq:
-                    writer.Write((byte)VmOpCode.CEQ);
+                    Write(writer, VmOpCode.CEQ);
                     break;
                 case Code.Clt or Code.Clt_Un:
-                    writer.Write((byte)VmOpCode.CLT);
+                    Write(writer, VmOpCode.CLT);
                     break;
                 case Code.Cgt or Code.Cgt_Un:
-                    writer.Write((byte)VmOpCode.CGT);
+                    Write(writer, VmOpCode.CGT);
                     break;
 
                 case Code.Ldc_I4:
-                    writer.Write((byte)VmOpCode.LDC_I4);
+                    Write(writer, VmOpCode.LDC_I4);
                     writer.Write((int)instr.Operand);
                     break;
                 case Code.Ldc_I4_S:
-                    writer.Write((byte)VmOpCode.LDC_I4);
+                    Write(writer, VmOpCode.LDC_I4);
                     writer.Write((int)(sbyte)instr.Operand);
                     break;
                 case Code.Ldc_I4_0: WriteLdcI4(writer, 0); break;
@@ -84,33 +86,33 @@ public class CilToVmTranslator
                 case Code.Ldc_I4_M1: WriteLdcI4(writer, -1); break;
 
                 case Code.Ldc_I8:
-                    writer.Write((byte)VmOpCode.LDC_I8);
+                    Write(writer, VmOpCode.LDC_I8);
                     writer.Write((long)instr.Operand);
                     break;
                 case Code.Ldc_R8:
-                    writer.Write((byte)VmOpCode.LDC_R8);
+                    Write(writer, VmOpCode.LDC_R8);
                     writer.Write((double)instr.Operand);
                     break;
                 case Code.Ldc_R4:
-                    writer.Write((byte)VmOpCode.LDC_R8);
+                    Write(writer, VmOpCode.LDC_R8);
                     writer.Write((double)(float)instr.Operand);
                     break;
                 case Code.Ldstr:
-                    writer.Write((byte)VmOpCode.LDSTR);
+                    Write(writer, VmOpCode.LDSTR);
                     writer.Write((string)instr.Operand);
                     break;
                 case Code.Ldnull:
-                    writer.Write((byte)VmOpCode.LDNULL);
+                    Write(writer, VmOpCode.LDNULL);
                     break;
                 case Code.Dup:
-                    writer.Write((byte)VmOpCode.DUP);
+                    Write(writer, VmOpCode.DUP);
                     break;
                 case Code.Pop:
-                    writer.Write((byte)VmOpCode.POP);
+                    Write(writer, VmOpCode.POP);
                     break;
 
                 case Code.Ldloc or Code.Ldloc_S:
-                    writer.Write((byte)VmOpCode.LDLOC);
+                    Write(writer, VmOpCode.LDLOC);
                     writer.Write(((Local)instr.Operand).Index);
                     break;
                 case Code.Ldloc_0: WriteLdloc(writer, 0); break;
@@ -119,7 +121,7 @@ public class CilToVmTranslator
                 case Code.Ldloc_3: WriteLdloc(writer, 3); break;
 
                 case Code.Stloc or Code.Stloc_S:
-                    writer.Write((byte)VmOpCode.STLOC);
+                    Write(writer, VmOpCode.STLOC);
                     writer.Write(((Local)instr.Operand).Index);
                     break;
                 case Code.Stloc_0: WriteStloc(writer, 0); break;
@@ -128,7 +130,7 @@ public class CilToVmTranslator
                 case Code.Stloc_3: WriteStloc(writer, 3); break;
 
                 case Code.Ldarg or Code.Ldarg_S:
-                    writer.Write((byte)VmOpCode.LDARG);
+                    Write(writer, VmOpCode.LDARG);
                     writer.Write(((Parameter)instr.Operand).Index);
                     break;
                 case Code.Ldarg_0: WriteLdarg(writer, 0); break;
@@ -137,137 +139,137 @@ public class CilToVmTranslator
                 case Code.Ldarg_3: WriteLdarg(writer, 3); break;
 
                 case Code.Starg or Code.Starg_S:
-                    writer.Write((byte)VmOpCode.STARG);
+                    Write(writer, VmOpCode.STARG);
                     writer.Write(((Parameter)instr.Operand).Index);
                     break;
 
                 case Code.Br or Code.Br_S:
-                    writer.Write((byte)VmOpCode.BR);
+                    Write(writer, VmOpCode.BR);
                     fixups.Add((ms.Position, ((Instruction)instr.Operand).Offset));
                     writer.Write(0);
                     break;
                 case Code.Brtrue or Code.Brtrue_S:
-                    writer.Write((byte)VmOpCode.BRTRUE);
+                    Write(writer, VmOpCode.BRTRUE);
                     fixups.Add((ms.Position, ((Instruction)instr.Operand).Offset));
                     writer.Write(0);
                     break;
                 case Code.Brfalse or Code.Brfalse_S:
-                    writer.Write((byte)VmOpCode.BRFALSE);
+                    Write(writer, VmOpCode.BRFALSE);
                     fixups.Add((ms.Position, ((Instruction)instr.Operand).Offset));
                     writer.Write(0);
                     break;
 
                 case Code.Beq or Code.Beq_S:
-                    writer.Write((byte)VmOpCode.CEQ);
-                    writer.Write((byte)VmOpCode.BRTRUE);
+                    Write(writer, VmOpCode.CEQ);
+                    Write(writer, VmOpCode.BRTRUE);
                     fixups.Add((ms.Position, ((Instruction)instr.Operand).Offset));
                     writer.Write(0);
                     break;
                 case Code.Bne_Un or Code.Bne_Un_S:
-                    writer.Write((byte)VmOpCode.CEQ);
-                    writer.Write((byte)VmOpCode.BRFALSE);
+                    Write(writer, VmOpCode.CEQ);
+                    Write(writer, VmOpCode.BRFALSE);
                     fixups.Add((ms.Position, ((Instruction)instr.Operand).Offset));
                     writer.Write(0);
                     break;
                 case Code.Blt or Code.Blt_S or Code.Blt_Un or Code.Blt_Un_S:
-                    writer.Write((byte)VmOpCode.CLT);
-                    writer.Write((byte)VmOpCode.BRTRUE);
+                    Write(writer, VmOpCode.CLT);
+                    Write(writer, VmOpCode.BRTRUE);
                     fixups.Add((ms.Position, ((Instruction)instr.Operand).Offset));
                     writer.Write(0);
                     break;
                 case Code.Bgt or Code.Bgt_S or Code.Bgt_Un or Code.Bgt_Un_S:
-                    writer.Write((byte)VmOpCode.CGT);
-                    writer.Write((byte)VmOpCode.BRTRUE);
+                    Write(writer, VmOpCode.CGT);
+                    Write(writer, VmOpCode.BRTRUE);
                     fixups.Add((ms.Position, ((Instruction)instr.Operand).Offset));
                     writer.Write(0);
                     break;
                 case Code.Ble or Code.Ble_S or Code.Ble_Un or Code.Ble_Un_S:
-                    writer.Write((byte)VmOpCode.CGT);
-                    writer.Write((byte)VmOpCode.BRFALSE);
+                    Write(writer, VmOpCode.CGT);
+                    Write(writer, VmOpCode.BRFALSE);
                     fixups.Add((ms.Position, ((Instruction)instr.Operand).Offset));
                     writer.Write(0);
                     break;
                 case Code.Bge or Code.Bge_S or Code.Bge_Un or Code.Bge_Un_S:
-                    writer.Write((byte)VmOpCode.CLT);
-                    writer.Write((byte)VmOpCode.BRFALSE);
+                    Write(writer, VmOpCode.CLT);
+                    Write(writer, VmOpCode.BRFALSE);
                     fixups.Add((ms.Position, ((Instruction)instr.Operand).Offset));
                     writer.Write(0);
                     break;
 
                 case Code.Call or Code.Callvirt:
-                    writer.Write((byte)VmOpCode.CALL);
+                    Write(writer, VmOpCode.CALL);
                     writer.Write(AddToTokenTable((IFullName)instr.Operand));
                     break;
                 case Code.Newobj:
-                    writer.Write((byte)VmOpCode.NEWOBJ);
+                    Write(writer, VmOpCode.NEWOBJ);
                     writer.Write(AddToTokenTable((IFullName)instr.Operand));
                     break;
                 case Code.Ldfld:
-                    writer.Write((byte)VmOpCode.LDFLD);
+                    Write(writer, VmOpCode.LDFLD);
                     writer.Write(AddToTokenTable((IFullName)instr.Operand));
                     break;
                 case Code.Stfld:
-                    writer.Write((byte)VmOpCode.STFLD);
+                    Write(writer, VmOpCode.STFLD);
                     writer.Write(AddToTokenTable((IFullName)instr.Operand));
                     break;
                 case Code.Ldsfld:
-                    writer.Write((byte)VmOpCode.LDSFLD);
+                    Write(writer, VmOpCode.LDSFLD);
                     writer.Write(AddToTokenTable((IFullName)instr.Operand));
                     break;
                 case Code.Stsfld:
-                    writer.Write((byte)VmOpCode.STSFLD);
+                    Write(writer, VmOpCode.STSFLD);
                     writer.Write(AddToTokenTable((IFullName)instr.Operand));
                     break;
 
                 case Code.Conv_I4:
-                    writer.Write((byte)VmOpCode.CONV_I4);
+                    Write(writer, VmOpCode.CONV_I4);
                     break;
                 case Code.Conv_I8:
-                    writer.Write((byte)VmOpCode.CONV_I8);
+                    Write(writer, VmOpCode.CONV_I8);
                     break;
                 case Code.Conv_R8 or Code.Conv_R4:
-                    writer.Write((byte)VmOpCode.CONV_R8);
+                    Write(writer, VmOpCode.CONV_R8);
                     break;
                 case Code.Conv_U1 or Code.Conv_U2 or Code.Conv_U4
                     or Code.Conv_I1 or Code.Conv_I2:
-                    writer.Write((byte)VmOpCode.CONV_I4);
+                    Write(writer, VmOpCode.CONV_I4);
                     break;
                 case Code.Box:
-                    writer.Write((byte)VmOpCode.BOX);
+                    Write(writer, VmOpCode.BOX);
                     writer.Write(AddToTokenTable((IFullName)instr.Operand));
                     break;
                 case Code.Unbox_Any or Code.Unbox:
-                    writer.Write((byte)VmOpCode.UNBOX);
+                    Write(writer, VmOpCode.UNBOX);
                     writer.Write(AddToTokenTable((IFullName)instr.Operand));
                     break;
 
                 case Code.Newarr:
-                    writer.Write((byte)VmOpCode.NEWARR);
+                    Write(writer, VmOpCode.NEWARR);
                     writer.Write(AddToTokenTable((IFullName)instr.Operand));
                     break;
                 case Code.Ldelem or Code.Ldelem_I4 or Code.Ldelem_I8
                     or Code.Ldelem_R8 or Code.Ldelem_Ref or Code.Ldelem_U1
                     or Code.Ldelem_U2 or Code.Ldelem_I1 or Code.Ldelem_I2
                     or Code.Ldelem_R4 or Code.Ldelem_I or Code.Ldelem_U4:
-                    writer.Write((byte)VmOpCode.LDELEM);
+                    Write(writer, VmOpCode.LDELEM);
                     break;
                 case Code.Stelem or Code.Stelem_I4 or Code.Stelem_I8
                     or Code.Stelem_R8 or Code.Stelem_Ref or Code.Stelem_I1
                     or Code.Stelem_I2 or Code.Stelem_I:
-                    writer.Write((byte)VmOpCode.STELEM);
+                    Write(writer, VmOpCode.STELEM);
                     break;
                 case Code.Ldlen:
-                    writer.Write((byte)VmOpCode.LDLEN);
+                    Write(writer, VmOpCode.LDLEN);
                     break;
 
                 case Code.Ret:
-                    writer.Write((byte)VmOpCode.RET);
+                    Write(writer, VmOpCode.RET);
                     break;
                 case Code.Throw:
-                    writer.Write((byte)VmOpCode.THROW);
+                    Write(writer, VmOpCode.THROW);
                     break;
                 case Code.Nop:
-                    writer.Write((byte)VmOpCode.NOP);
+                    Write(writer, VmOpCode.NOP);
                     break;
 
                 default:
@@ -295,8 +297,9 @@ public class CilToVmTranslator
         return _metadataTokenTable.Count - 1;
     }
 
-    private static void WriteLdcI4(BinaryWriter w, int val) { w.Write((byte)VmOpCode.LDC_I4); w.Write(val); }
-    private static void WriteLdloc(BinaryWriter w, int idx) { w.Write((byte)VmOpCode.LDLOC); w.Write(idx); }
-    private static void WriteStloc(BinaryWriter w, int idx) { w.Write((byte)VmOpCode.STLOC); w.Write(idx); }
-    private static void WriteLdarg(BinaryWriter w, int idx) { w.Write((byte)VmOpCode.LDARG); w.Write(idx); }
+    private void Write(BinaryWriter w, VmOpCode op) => w.Write(_isa.PickEncoding(op));
+    private void WriteLdcI4(BinaryWriter w, int val) { Write(w, VmOpCode.LDC_I4); w.Write(val); }
+    private void WriteLdloc(BinaryWriter w, int idx) { Write(w, VmOpCode.LDLOC); w.Write(idx); }
+    private void WriteStloc(BinaryWriter w, int idx) { Write(w, VmOpCode.STLOC); w.Write(idx); }
+    private void WriteLdarg(BinaryWriter w, int idx) { Write(w, VmOpCode.LDARG); w.Write(idx); }
 }
