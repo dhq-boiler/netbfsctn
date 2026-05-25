@@ -65,6 +65,31 @@ public class ILHideMethodCalls : IObfuscationTechnique<ModuleDef>
             if (resolved == null) continue;
             if (resolved.IsPublic) continue;
 
+            // P/Invoke ターゲット ([DllImport] / pinvokeimpl) はスキップ。
+            // reflection 経由で呼ぶと unmanaged transition の引数マーシャリング
+            // (特に IntPtr / delegate / out 引数) が壊れて runtime で
+            // AccessViolationException を起こす。 ILNameObfuscator が pinvoke を
+            // rename 対象外にしているのと同じ理由。
+            if (resolved.IsPinvokeImpl || resolved.ImplMap != null) continue;
+
+            // [UnmanagedCallersOnly] 属性が付いたメソッドも reflection invoke 不可。
+            if (HasUnmanagedCallersOnly(resolved)) continue;
+
+            // パラメータか戻り値に delegate / function pointer 型を含むメソッドは
+            // reflection invoke 経由でマーシャリングが壊れる場合があるためスキップ。
+            // (例: EnumWindows(EnumWindowsProc, IntPtr) の EnumWindowsProc delegate)
+            if (SignatureContainsDelegate(methodSig, module)) continue;
+
+            // ref / out / in パラメータは object[] では運べないため reflection invoke で
+            // NullReferenceException を投げる (.NET runtime の MethodBaseInvoker は
+            // ByRef 引数を null として処理しようとして失敗する)。
+            // 戻り値が ByRef の場合も同様。
+            if (SignatureUsesByRef(methodSig)) continue;
+
+            // 宣言型がオープンなジェネリクス (T を含む) や generic instantiation を
+            // 持つ場合、 ResolveMethod 経由の reflection invoke で型推論が壊れることがある。
+            if (targetMethod.DeclaringType is TypeSpec) continue;
+
             ReplaceWithReflectionCall(body, instr, targetMethod, module, importer, invokeMethod);
 
             result.HiddenMethodCalls++;
@@ -271,5 +296,58 @@ public class ILHideMethodCalls : IObfuscationTechnique<ModuleDef>
         module.Types.Add(helperType);
 
         return helperType;
+    }
+
+    private static bool HasUnmanagedCallersOnly(MethodDef method)
+    {
+        if (!method.HasCustomAttributes) return false;
+        foreach (var attr in method.CustomAttributes)
+        {
+            if (attr.TypeFullName == "System.Runtime.InteropServices.UnmanagedCallersOnlyAttribute")
+                return true;
+        }
+        return false;
+    }
+
+    private static bool SignatureContainsDelegate(MethodSig sig, ModuleDef module)
+    {
+        if (TypeReferencesDelegate(sig.RetType)) return true;
+        foreach (var p in sig.Params)
+        {
+            if (TypeReferencesDelegate(p)) return true;
+        }
+        return false;
+    }
+
+    private static bool SignatureUsesByRef(MethodSig sig)
+    {
+        if (sig.RetType is ByRefSig) return true;
+        foreach (var p in sig.Params)
+        {
+            if (p is ByRefSig) return true;
+        }
+        return false;
+    }
+
+    private static bool TypeReferencesDelegate(TypeSig? typeSig)
+    {
+        if (typeSig is null) return false;
+        // FnPtr (関数ポインタ) は常に NG。 reflection invoke 不可。
+        if (typeSig is FnPtrSig) return true;
+
+        var typeDefOrRef = typeSig.ToTypeDefOrRef();
+        var typeDef = (typeDefOrRef as TypeDef) ?? (typeDefOrRef as TypeRef)?.ResolveTypeDef();
+        if (typeDef is null) return false;
+
+        // System.Delegate / System.MulticastDelegate を継承していれば delegate 型。
+        var current = typeDef;
+        while (current is not null)
+        {
+            var baseName = current.BaseType?.FullName;
+            if (baseName == "System.Delegate" || baseName == "System.MulticastDelegate")
+                return true;
+            current = current.BaseType?.ResolveTypeDef();
+        }
+        return false;
     }
 }
