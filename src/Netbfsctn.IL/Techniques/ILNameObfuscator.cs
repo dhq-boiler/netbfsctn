@@ -770,6 +770,14 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             {
                 if (method.Parameters == null) continue;
 
+                // コンストラクター引数はリネームしない。 System.Text.Json / Newtonsoft.Json /
+                // System.Text.Json 用の record 位置パラメーター・パターン (parameterless
+                // ctor を持たない型) は、 JSON のキーを constructor parameter 名と照合して
+                // deserialize するため、 ここで rename すると invisible に deserialize が
+                // 壊れる。 IP 保護の観点でも constructor 引数名は通常ペイロード的情報を
+                // 持たないため、 安全側に倒して常にスキップする。
+                if (method.IsConstructor) continue;
+
                 foreach (var param in method.Parameters)
                 {
                     // 隠しパラメーター (this等) はスキップ
