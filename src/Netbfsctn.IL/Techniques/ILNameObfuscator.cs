@@ -42,8 +42,12 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             RenameVirtualEventGroups(module, context, result, sameModuleRenames);
         }
 
-        // パラメーター名の難読化（全メソッド対象、型のアクセス修飾子に関係なく安全）
-        RenameParameters(module, context, result);
+        // パラメーター名の難読化。 public メソッドの引数名は renamePublic が立っているときだけ
+        // リネームする (メンバー名 rename と対称)。 理由: リフレクションでメソッド引数名を読む
+        // フレームワーク (MCP の tool スキーマ生成、ASP.NET の model binding 等) は、 引数名が
+        // 化けると外部に化けた名前を広告してしまい invisible に壊れる。 引数名は IL 実行に関与
+        // しないメタデータで IP 保護価値もほぼ無いため、 外部可視メソッドでは安全側に倒して保持する。
+        RenameParameters(module, context, result, renamePublic);
     }
 
     /// <summary>
@@ -759,7 +763,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             or "RemoveAt" or "GetType" or "Finalize";
     }
 
-    private static void RenameParameters(ModuleDef module, ObfuscationContext context, ObfuscationResult result)
+    private static void RenameParameters(ModuleDef module, ObfuscationContext context, ObfuscationResult result, bool renamePublic)
     {
         var count = 0;
         foreach (var type in module.GetTypes())
@@ -777,6 +781,10 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 // 壊れる。 IP 保護の観点でも constructor 引数名は通常ペイロード的情報を
                 // 持たないため、 安全側に倒して常にスキップする。
                 if (method.IsConstructor) continue;
+
+                // 外部可視 (public) メソッドの引数名はメンバー名 rename と同じ基準で保持する。
+                // MCP の tool スキーマはリフレクションで引数名を読むため、 化けると壊れる。
+                if (method.IsPublic && !renamePublic) continue;
 
                 foreach (var param in method.Parameters)
                 {
