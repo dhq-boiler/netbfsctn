@@ -651,9 +651,14 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         ModuleDef module, ObfuscationContext context, ObfuscationResult result,
         Dictionary<(TypeDef, string), string> sameModuleRenames)
     {
-        // WPF アセンブリのプロパティは BAML が名前で参照するためリネーム不可
+        // WPF アセンブリのプロパティは BAML が名前で参照するためリネーム不可。
+        // ただし --xaml-dir 指定時は XAML 解析で BAML バインディング対象を per-property に
+        // 検出できるため、モジュール全体をスキップする必要はない (per-property 側の XAML
+        // skip に任せる)。 早期 return すると、 別アセンブリの iface を実装する virtual
+        // プロパティが impl 側でリネームされず、 iface 側だけリネームされて CLR の暗黙
+        // インターフェース dispatch が崩れる (TypeLoadException) ため。
         var moduleName = module.Assembly?.Name?.String ?? "";
-        if (context.WpfModuleNames.Contains(moduleName))
+        if (context.WpfModuleNames.Contains(moduleName) && context.XamlAnalysis == null)
             return;
 
         var allTypes = module.GetTypes().ToList();
