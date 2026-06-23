@@ -49,6 +49,15 @@ public class ILObfuscationPipeline : IObfuscationPipeline
                 entries.Add((addInput, addOutput, addMixed));
             }
 
+            // バッチ処理対象の全アセンブリ名を context に登録
+            // (クロスアセンブリ iface 実装の名前同期に使用)
+            foreach (var module in modules)
+            {
+                var asmName = module.Assembly?.Name?.String;
+                if (!string.IsNullOrEmpty(asmName))
+                    context.BatchAssemblyNames.Add(asmName);
+            }
+
             // WPF アセンブリ検出 (型リネーム自動スキップ用)
             foreach (var module in modules)
             {

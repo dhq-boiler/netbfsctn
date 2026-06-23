@@ -144,7 +144,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
 
             // モジュール外インターフェイス (IDisposable, IEnumerable 等) を実装する
             // メソッドはリネーム不可（CLRが名前でマッチングするため）
-            if (ImplementsExternalInterface(group, typeByFullName)) continue;
+            if (ImplementsExternalInterface(group, typeByFullName, context.BatchAssemblyNames)) continue;
 
             // XAML イベントハンドラとして参照されるメソッドはスキップ
             if (xaml != null && group.Any(m => xaml.EventHandlerNames.Contains(m.Name.String)))
@@ -153,12 +153,25 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 continue;
             }
 
-            var newName = context.NameGenerator.Next();
+            // クロスアセンブリ iface 実装で、別モジュール側 (impl or iface) が既に新名を
+            // 決定していれば再利用する。両側を同じ名前に揃えないと CLR の interface dispatch が
+            // 解決できず TypeLoadException になる。
+            string? shared = null;
+            foreach (var m in group)
+            {
+                var pc = m.MethodSig?.Params?.Count ?? 0;
+                shared = TryGetSharedNewName(m.DeclaringType, m.Name.String, pc, context, typeByFullName);
+                if (shared != null) break;
+            }
+            var newName = shared ?? context.NameGenerator.Next();
             foreach (var method in group)
             {
                 var oldName = method.Name.String;
-                context.MemberRenameHistory[(method.DeclaringType, oldName, method.MethodSig?.Params?.Count ?? 0)] = newName;
+                var paramCount = method.MethodSig?.Params?.Count ?? 0;
+                context.MemberRenameHistory[(method.DeclaringType, oldName, paramCount)] = newName;
                 sameModuleRenames[(method.DeclaringType, oldName)] = newName;
+                // バッチ内別モジュールの iface / base 側が後で同名を見つけられるよう記録
+                RecordSharedNewName(method.DeclaringType, oldName, paramCount, newName, context, typeByFullName);
                 context.Logger.Verbose($"virtual グループリネーム: {method.DeclaringType.Name}.{oldName} -> {newName}");
                 method.Name = newName;
                 result.RenamedSymbols++;
@@ -196,6 +209,109 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
 
         if (renamedGroups > 0)
             context.Logger.Info($"virtual メソッドグループリネーム: {renamedGroups} グループ");
+    }
+
+    /// <summary>
+    /// 与えられた型が、現在のバッチ処理対象アセンブリに属するかをチェック。
+    /// (--additional-input で指定された別アセンブリに居る iface の検出に使う)
+    /// </summary>
+    private static bool IsInBatchAssembly(TypeDef? type, HashSet<string> batchAsmNames)
+    {
+        if (type == null) return false;
+        var asm = type.Module?.Assembly?.Name?.String;
+        return !string.IsNullOrEmpty(asm) && batchAsmNames.Contains(asm);
+    }
+
+    /// <summary>
+    /// クロスアセンブリで暗黙的インターフェース実装される virtual メンバーについて、
+    /// バッチ内の他モジュールで既に新名が割り当てられていれば返す。
+    /// (impl 側が先に処理されたケース／iface 側が先に処理されたケースの両方をカバー)
+    /// </summary>
+    /// <param name="declaringType">対象メンバーの宣言型</param>
+    /// <param name="oldMemberName">メンバーの現在の名前 (リネーム前)</param>
+    /// <param name="paramCount">プロパティ/イベント名は 0、メソッドは引数数</param>
+    private static string? TryGetSharedNewName(
+        TypeDef declaringType, string oldMemberName, int paramCount,
+        ObfuscationContext context,
+        Dictionary<string, TypeDef> typeByFullName)
+    {
+        var history = context.MemberRenameHistory;
+        var batchAsmNames = context.BatchAssemblyNames;
+
+        // 同型のエントリ
+        if (history.TryGetValue((declaringType, oldMemberName, paramCount), out var ownName))
+            return ownName;
+
+        // 直接実装するバッチ内 iface のエントリ
+        foreach (var iface in declaringType.Interfaces)
+        {
+            if (typeByFullName.ContainsKey(iface.Interface.FullName)) continue;
+            var ifaceTypeDef = iface.Interface.ResolveTypeDef();
+            if (!IsInBatchAssembly(ifaceTypeDef, batchAsmNames)) continue;
+            if (history.TryGetValue((ifaceTypeDef!, oldMemberName, paramCount), out var ifaceName))
+                return ifaceName;
+        }
+
+        // 基底型チェーン (バッチ内別モジュールの base が iface を実装しているケース) の iface
+        var baseRef = declaringType.BaseType;
+        while (baseRef != null)
+        {
+            var baseDef = baseRef.ResolveTypeDef();
+            if (baseDef == null) break;
+            foreach (var iface in baseDef.Interfaces)
+            {
+                var ifaceTypeDef = iface.Interface.ResolveTypeDef();
+                if (!IsInBatchAssembly(ifaceTypeDef, batchAsmNames)) continue;
+                if (history.TryGetValue((ifaceTypeDef!, oldMemberName, paramCount), out var ifaceName))
+                    return ifaceName;
+            }
+            // バッチ内 base virtual メンバー自身も同名共有対象
+            if (IsInBatchAssembly(baseDef, batchAsmNames))
+            {
+                if (history.TryGetValue((baseDef, oldMemberName, paramCount), out var baseName))
+                    return baseName;
+            }
+            baseRef = baseDef.BaseType;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// declaringType が実装するバッチ内 iface (および base 経由) の TypeDef キーに、
+    /// 同じ新名を記録する。第二の pass (iface 側 / base 側) がこれを見つけて再利用する。
+    /// </summary>
+    private static void RecordSharedNewName(
+        TypeDef declaringType, string oldMemberName, int paramCount, string newName,
+        ObfuscationContext context,
+        Dictionary<string, TypeDef> typeByFullName)
+    {
+        var history = context.MemberRenameHistory;
+        var batchAsmNames = context.BatchAssemblyNames;
+
+        foreach (var iface in declaringType.Interfaces)
+        {
+            if (typeByFullName.ContainsKey(iface.Interface.FullName)) continue;
+            var ifaceTypeDef = iface.Interface.ResolveTypeDef();
+            if (!IsInBatchAssembly(ifaceTypeDef, batchAsmNames)) continue;
+            history.TryAdd((ifaceTypeDef!, oldMemberName, paramCount), newName);
+        }
+
+        var baseRef = declaringType.BaseType;
+        while (baseRef != null)
+        {
+            var baseDef = baseRef.ResolveTypeDef();
+            if (baseDef == null) break;
+            foreach (var iface in baseDef.Interfaces)
+            {
+                var ifaceTypeDef = iface.Interface.ResolveTypeDef();
+                if (!IsInBatchAssembly(ifaceTypeDef, batchAsmNames)) continue;
+                history.TryAdd((ifaceTypeDef!, oldMemberName, paramCount), newName);
+            }
+            if (IsInBatchAssembly(baseDef, batchAsmNames))
+                history.TryAdd((baseDef, oldMemberName, paramCount), newName);
+            baseRef = baseDef.BaseType;
+        }
     }
 
     /// <summary>
@@ -320,7 +436,8 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
     /// </summary>
     private static bool ImplementsExternalInterface(
         List<MethodDef> group,
-        Dictionary<string, TypeDef> typeByFullName)
+        Dictionary<string, TypeDef> typeByFullName,
+        HashSet<string> batchAsmNames)
     {
         var methodName = group[0].Name.String;
         var methodSig = group[0].MethodSig;
@@ -333,8 +450,12 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 foreach (var ov in method.Overrides)
                 {
                     var declType = ov.MethodDeclaration.DeclaringType;
-                    if (declType != null && !typeByFullName.ContainsKey(declType.FullName))
-                        return true;
+                    if (declType == null) continue;
+                    if (typeByFullName.ContainsKey(declType.FullName)) continue;
+                    // バッチ内なら同名共有で扱うので「外部」とはみなさない
+                    var resolved = declType is TypeDef td ? td : declType.ResolveTypeDef();
+                    if (IsInBatchAssembly(resolved, batchAsmNames)) continue;
+                    return true;
                 }
             }
 
@@ -342,11 +463,11 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             if (type == null) continue;
 
             // 外部インターフェイスに同名メソッドがあるかチェック（全インターフェイスを再帰的に）
-            if (HasMethodInExternalInterfaces(type, methodName, methodSig, typeByFullName))
+            if (HasMethodInExternalInterfaces(type, methodName, methodSig, typeByFullName, batchAsmNames))
                 return true;
 
             // 外部基底型チェーン全体を走査
-            if (HasMethodInExternalBaseChain(type, methodName, methodSig, typeByFullName))
+            if (HasMethodInExternalBaseChain(type, methodName, methodSig, typeByFullName, batchAsmNames))
                 return true;
         }
 
@@ -361,7 +482,8 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
     /// </summary>
     private static bool HasMethodInExternalInterfaces(
         TypeDef type, string methodName, MethodSig? methodSig,
-        Dictionary<string, TypeDef> typeByFullName)
+        Dictionary<string, TypeDef> typeByFullName,
+        HashSet<string> batchAsmNames)
     {
         foreach (var iface in type.Interfaces)
         {
@@ -372,7 +494,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 // モジュール内インターフェイスだが、そのインターフェイス自身が
                 // 外部インターフェイスを継承している場合を再帰チェック
                 var ifaceTypeDef = typeByFullName[ifaceFullName];
-                if (HasMethodInExternalInterfaces(ifaceTypeDef, methodName, methodSig, typeByFullName))
+                if (HasMethodInExternalInterfaces(ifaceTypeDef, methodName, methodSig, typeByFullName, batchAsmNames))
                     return true;
                 continue;
             }
@@ -385,6 +507,14 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 if (IsWellKnownRuntimeMethodName(methodName))
                     return true;
                 continue; // それ以外はドメイン固有とみなして続行
+            }
+
+            // バッチ内 iface は同名共有するので「外部」扱いせず続行
+            if (IsInBatchAssembly(resolved, batchAsmNames))
+            {
+                if (HasMethodInExternalInterfaces(resolved, methodName, methodSig, typeByFullName, batchAsmNames))
+                    return true;
+                continue;
             }
 
             // 名前のみで照合（ジェネリック型パラメータの不一致を回避）
@@ -401,7 +531,8 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
     /// </summary>
     private static bool HasMethodInExternalBaseChain(
         TypeDef type, string methodName, MethodSig? methodSig,
-        Dictionary<string, TypeDef> typeByFullName)
+        Dictionary<string, TypeDef> typeByFullName,
+        HashSet<string> batchAsmNames)
     {
         var current = type.BaseType;
         while (current != null)
@@ -412,7 +543,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             {
                 // モジュール内基底型 → 飛ばしてさらに上をチェック
                 // ただしこの基底型のインターフェイスもチェック
-                if (HasMethodInExternalInterfaces(baseTypeDef, methodName, methodSig, typeByFullName))
+                if (HasMethodInExternalInterfaces(baseTypeDef, methodName, methodSig, typeByFullName, batchAsmNames))
                     return true;
                 current = baseTypeDef.BaseType;
                 continue;
@@ -425,6 +556,15 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 if (IsWellKnownRuntimeMethodName(methodName))
                     return true;
                 break; // 解決不能だがドメイン固有メソッドなら続行
+            }
+
+            // バッチ内 base は外部扱いしない (同名共有で解決)
+            if (IsInBatchAssembly(resolved, batchAsmNames))
+            {
+                if (HasMethodInExternalInterfaces(resolved, methodName, methodSig, typeByFullName, batchAsmNames))
+                    return true;
+                current = resolved.BaseType;
+                continue;
             }
 
             // 名前のみで照合（ジェネリック型パラメータの不一致を回避）
@@ -556,7 +696,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             if (!typeByFullName.ContainsKey(rootType.FullName)) continue;
 
             // 外部インターフェイス/基底型チェック
-            if (group.Any(g => HasExternalVirtualProperty(g.type, g.prop.Name, typeByFullName)))
+            if (group.Any(g => HasExternalVirtualProperty(g.type, g.prop.Name, typeByFullName, context.BatchAssemblyNames)))
                 continue;
 
             // XAML バインディングで参照されるプロパティはスキップ
@@ -566,27 +706,55 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 continue;
             }
 
-            var newName = context.NameGenerator.Next();
+            // クロスアセンブリ iface 実装で別モジュールが既に新名を決定済みなら再利用
+            string? shared = null;
+            foreach (var (gtype, gprop) in group)
+            {
+                // プロパティ名キーをまず確認
+                shared = TryGetSharedNewName(gtype, gprop.Name.String, 0, context, typeByFullName);
+                if (shared != null) break;
+                // getter / setter キー経由でも探す (記録順の都合で見つかるパターンがある)
+                if (gprop.GetMethod != null)
+                {
+                    var s = TryGetSharedNewName(gtype, gprop.GetMethod.Name.String,
+                        gprop.GetMethod.MethodSig?.Params?.Count ?? 0, context, typeByFullName);
+                    if (s != null && s.StartsWith("get_")) { shared = s.Substring(4); break; }
+                }
+                if (gprop.SetMethod != null)
+                {
+                    var s = TryGetSharedNewName(gtype, gprop.SetMethod.Name.String,
+                        gprop.SetMethod.MethodSig?.Params?.Count ?? 0, context, typeByFullName);
+                    if (s != null && s.StartsWith("set_")) { shared = s.Substring(4); break; }
+                }
+            }
+            var newName = shared ?? context.NameGenerator.Next();
             foreach (var (type, prop) in group)
             {
                 context.Logger.Verbose($"virtual プロパティリネーム: {type.Name}.{prop.Name} -> {newName}");
+                var propOldName = prop.Name.String;
                 prop.Name = newName;
                 result.RenamedSymbols++;
+                // プロパティ名自体もバッチ内 iface 側に伝播
+                RecordSharedNewName(type, propOldName, 0, newName, context, typeByFullName);
 
                 if (prop.GetMethod != null)
                 {
                     var oldName = prop.GetMethod.Name.String;
+                    var paramCount = prop.GetMethod.MethodSig?.Params?.Count ?? 0;
                     var getterName = "get_" + newName;
-                    context.MemberRenameHistory[(type, oldName, prop.GetMethod.MethodSig?.Params?.Count ?? 0)] = getterName;
+                    context.MemberRenameHistory[(type, oldName, paramCount)] = getterName;
                     sameModuleRenames[(type, oldName)] = getterName;
+                    RecordSharedNewName(type, oldName, paramCount, getterName, context, typeByFullName);
                     prop.GetMethod.Name = getterName;
                 }
                 if (prop.SetMethod != null)
                 {
                     var oldName = prop.SetMethod.Name.String;
+                    var paramCount = prop.SetMethod.MethodSig?.Params?.Count ?? 0;
                     var setterName = "set_" + newName;
-                    context.MemberRenameHistory[(type, oldName, prop.SetMethod.MethodSig?.Params?.Count ?? 0)] = setterName;
+                    context.MemberRenameHistory[(type, oldName, paramCount)] = setterName;
                     sameModuleRenames[(type, oldName)] = setterName;
+                    RecordSharedNewName(type, oldName, paramCount, setterName, context, typeByFullName);
                     prop.SetMethod.Name = setterName;
                 }
             }
@@ -637,38 +805,53 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             var (rootType, _) = key;
             if (!typeByFullName.ContainsKey(rootType.FullName)) continue;
 
-            if (group.Any(g => HasExternalVirtualEvent(g.type, g.evt.Name, typeByFullName)))
+            if (group.Any(g => HasExternalVirtualEvent(g.type, g.evt.Name, typeByFullName, context.BatchAssemblyNames)))
                 continue;
 
-            var newName = context.NameGenerator.Next();
+            // クロスアセンブリ iface 実装で別モジュールが既に新名を決定済みなら再利用
+            string? shared = null;
+            foreach (var (gtype, gevt) in group)
+            {
+                shared = TryGetSharedNewName(gtype, gevt.Name.String, 0, context, typeByFullName);
+                if (shared != null) break;
+            }
+            var newName = shared ?? context.NameGenerator.Next();
             foreach (var (type, evt) in group)
             {
                 context.Logger.Verbose($"virtual イベントリネーム: {type.Name}.{evt.Name} -> {newName}");
+                var evtOldName = evt.Name.String;
                 evt.Name = newName;
                 result.RenamedSymbols++;
+                RecordSharedNewName(type, evtOldName, 0, newName, context, typeByFullName);
 
                 if (evt.AddMethod != null)
                 {
                     var oldName = evt.AddMethod.Name.String;
+                    var paramCount = evt.AddMethod.MethodSig?.Params?.Count ?? 0;
                     var addName = "add_" + newName;
-                    context.MemberRenameHistory[(type, oldName, evt.AddMethod.MethodSig?.Params?.Count ?? 0)] = addName;
+                    context.MemberRenameHistory[(type, oldName, paramCount)] = addName;
                     sameModuleRenames[(type, oldName)] = addName;
+                    RecordSharedNewName(type, oldName, paramCount, addName, context, typeByFullName);
                     evt.AddMethod.Name = addName;
                 }
                 if (evt.RemoveMethod != null)
                 {
                     var oldName = evt.RemoveMethod.Name.String;
+                    var paramCount = evt.RemoveMethod.MethodSig?.Params?.Count ?? 0;
                     var removeName = "remove_" + newName;
-                    context.MemberRenameHistory[(type, oldName, evt.RemoveMethod.MethodSig?.Params?.Count ?? 0)] = removeName;
+                    context.MemberRenameHistory[(type, oldName, paramCount)] = removeName;
                     sameModuleRenames[(type, oldName)] = removeName;
+                    RecordSharedNewName(type, oldName, paramCount, removeName, context, typeByFullName);
                     evt.RemoveMethod.Name = removeName;
                 }
                 if (evt.InvokeMethod != null)
                 {
                     var oldName = evt.InvokeMethod.Name.String;
+                    var paramCount = evt.InvokeMethod.MethodSig?.Params?.Count ?? 0;
                     var raiseName = "raise_" + newName;
-                    context.MemberRenameHistory[(type, oldName, evt.InvokeMethod.MethodSig?.Params?.Count ?? 0)] = raiseName;
+                    context.MemberRenameHistory[(type, oldName, paramCount)] = raiseName;
                     sameModuleRenames[(type, oldName)] = raiseName;
+                    RecordSharedNewName(type, oldName, paramCount, raiseName, context, typeByFullName);
                     evt.InvokeMethod.Name = raiseName;
                 }
             }
@@ -716,37 +899,53 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         return type;
     }
 
-    private static bool HasExternalVirtualProperty(TypeDef type, UTF8String propName, Dictionary<string, TypeDef> typeByFullName)
+    private static bool HasExternalVirtualProperty(
+        TypeDef type, UTF8String propName,
+        Dictionary<string, TypeDef> typeByFullName,
+        HashSet<string> batchAsmNames)
     {
         foreach (var iface in type.Interfaces)
         {
             if (typeByFullName.ContainsKey(iface.Interface.FullName)) continue;
-            // 外部インターフェイスに同名プロパティがあればスキップ
             var ifaceTypeDef = iface.Interface.ResolveTypeDef();
             if (ifaceTypeDef == null) return true; // 解決不能 → 安全のためスキップ
+            // バッチ内 iface は impl と iface で名前を揃えるため、ここでは「外部」扱いにしない
+            if (IsInBatchAssembly(ifaceTypeDef, batchAsmNames)) continue;
             if (ifaceTypeDef.Properties.Any(p => p.Name == propName)) return true;
         }
         if (type.BaseType != null && !typeByFullName.ContainsKey(type.BaseType.FullName))
         {
             var baseTypeDef = type.BaseType.ResolveTypeDef();
-            if (baseTypeDef?.Properties.Any(p => p.Name == propName) == true) return true;
+            if (baseTypeDef?.Properties.Any(p => p.Name == propName) == true)
+            {
+                if (!IsInBatchAssembly(baseTypeDef, batchAsmNames))
+                    return true;
+            }
         }
         return false;
     }
 
-    private static bool HasExternalVirtualEvent(TypeDef type, UTF8String evtName, Dictionary<string, TypeDef> typeByFullName)
+    private static bool HasExternalVirtualEvent(
+        TypeDef type, UTF8String evtName,
+        Dictionary<string, TypeDef> typeByFullName,
+        HashSet<string> batchAsmNames)
     {
         foreach (var iface in type.Interfaces)
         {
             if (typeByFullName.ContainsKey(iface.Interface.FullName)) continue;
             var ifaceTypeDef = iface.Interface.ResolveTypeDef();
             if (ifaceTypeDef == null) return true;
+            if (IsInBatchAssembly(ifaceTypeDef, batchAsmNames)) continue;
             if (ifaceTypeDef.Events.Any(e => e.Name == evtName)) return true;
         }
         if (type.BaseType != null && !typeByFullName.ContainsKey(type.BaseType.FullName))
         {
             var baseTypeDef = type.BaseType.ResolveTypeDef();
-            if (baseTypeDef?.Events.Any(e => e.Name == evtName) == true) return true;
+            if (baseTypeDef?.Events.Any(e => e.Name == evtName) == true)
+            {
+                if (!IsInBatchAssembly(baseTypeDef, batchAsmNames))
+                    return true;
+            }
         }
         return false;
     }
@@ -926,7 +1125,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
 
                 // 外部インターフェースの暗黙的実装メソッドはスキップ
                 // (構造体や sealed クラスは IsVirtual=false だが、CLR が名前でマッチングするため)
-                if (IsImplicitExternalInterfaceMethod(type, method))
+                if (IsImplicitExternalInterfaceMethod(type, method, context.BatchAssemblyNames))
                 {
                     context.Logger.Verbose($"外部インターフェース実装のためスキップ: {type.Name}.{oldName}");
                     continue;
@@ -1101,7 +1300,8 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
     /// 構造体や sealed クラスのインターフェース実装は IsVirtual=false だが、
     /// CLR は名前+シグネチャで暗黙マッチングするため、リネームすると TypeLoadException になる。
     /// </summary>
-    private static bool IsImplicitExternalInterfaceMethod(TypeDef type, MethodDef method)
+    private static bool IsImplicitExternalInterfaceMethod(
+        TypeDef type, MethodDef method, HashSet<string> batchAsmNames)
     {
         if (type.Interfaces.Count == 0) return false;
 
@@ -1120,6 +1320,9 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
 
             // モジュール内インターフェースはスキップ (virtual グループリネームで処理される)
             if (resolved.Module == type.Module) continue;
+
+            // バッチ内 iface は別パスで名前共有するので、ここでは「外部」扱いしない
+            if (IsInBatchAssembly(resolved, batchAsmNames)) continue;
 
             // 外部インターフェースに同名メソッドがあればスキップ
             // (ジェネリック型パラメータのためシグネチャ比較ではなく名前で照合)
@@ -1144,6 +1347,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                     continue;
                 }
                 if (resolved.Module == type.Module) continue;
+                if (IsInBatchAssembly(resolved, batchAsmNames)) continue;
                 if (resolved.Methods.Any(m => m.Name == methodName))
                     return true;
             }

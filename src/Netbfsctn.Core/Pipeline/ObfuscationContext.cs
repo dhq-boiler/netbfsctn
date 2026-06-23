@@ -38,4 +38,13 @@ public class ObfuscationContext
     /// WPF アセンブリでは BAML の型テーブルとの整合性のため、型名リネームを自動スキップする。
     /// </summary>
     public HashSet<string> WpfModuleNames { get; } = new();
+
+    /// <summary>
+    /// 同一バッチで処理中の全モジュールのアセンブリ名セット。
+    /// メイン入力 + --additional-input で指定された全アセンブリ。
+    /// クロスアセンブリの暗黙インターフェース実装で、iface 側と impl 側が別モジュールに分かれている場合に、
+    /// 「外部だが同じバッチに居る」インターフェイスを検出するために使う。バッチ内 iface は
+    /// 名前リネームをスキップせず、MemberRenameHistory を媒介に impl と同一の新名へ揃える。
+    /// </summary>
+    public HashSet<string> BatchAssemblyNames { get; } = new();
 }
