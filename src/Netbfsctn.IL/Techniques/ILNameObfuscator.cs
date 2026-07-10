@@ -144,7 +144,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
 
             // モジュール外インターフェイス (IDisposable, IEnumerable 等) を実装する
             // メソッドはリネーム不可（CLRが名前でマッチングするため）
-            if (ImplementsExternalInterface(group, typeByFullName, context.BatchAssemblyNames)) continue;
+            if (ImplementsExternalInterface(group, typeByFullName, context.BatchAssemblyNames, context)) continue;
 
             // XAML イベントハンドラとして参照されるメソッドはスキップ
             if (xaml != null && group.Any(m => xaml.EventHandlerNames.Contains(m.Name.String)))
@@ -212,6 +212,25 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
     }
 
     /// <summary>
+    /// TypeRef/TypeDef/TypeSpec を TypeDef に解決する。dnlib の
+    /// <see cref="ITypeDefOrRef.ResolveTypeDef"/> が null を返した場合、バッチ内モジュール
+    /// から元 FullName で fallback lookup する。
+    ///
+    /// probing path 不足で dnlib が iface/base の TypeRef を解決できない場合のレスキュー。
+    /// バッチ内であることが判明していれば、名前ベースで安全に見つけられる。バッチ外の
+    /// 解決不能な参照については引き続き null を返す。
+    /// </summary>
+    private static TypeDef? ResolveOrBatchLookup(ITypeDefOrRef? typeDefOrRef, ObfuscationContext context)
+    {
+        if (typeDefOrRef == null) return null;
+        var resolved = typeDefOrRef.ResolveTypeDef();
+        if (resolved != null) return resolved;
+        return context.BatchTypesByOriginalFullName.TryGetValue(typeDefOrRef.FullName, out var t)
+            ? t as TypeDef
+            : null;
+    }
+
+    /// <summary>
     /// 与えられた型が、現在のバッチ処理対象アセンブリに属するかをチェック。
     /// (--additional-input で指定された別アセンブリに居る iface の検出に使う)
     /// </summary>
@@ -246,7 +265,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         foreach (var iface in declaringType.Interfaces)
         {
             if (typeByFullName.ContainsKey(iface.Interface.FullName)) continue;
-            var ifaceTypeDef = iface.Interface.ResolveTypeDef();
+            var ifaceTypeDef = ResolveOrBatchLookup(iface.Interface, context);
             if (!IsInBatchAssembly(ifaceTypeDef, batchAsmNames)) continue;
             if (history.TryGetValue((ifaceTypeDef!, oldMemberName, paramCount), out var ifaceName))
                 return ifaceName;
@@ -256,11 +275,11 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         var baseRef = declaringType.BaseType;
         while (baseRef != null)
         {
-            var baseDef = baseRef.ResolveTypeDef();
+            var baseDef = ResolveOrBatchLookup(baseRef, context);
             if (baseDef == null) break;
             foreach (var iface in baseDef.Interfaces)
             {
-                var ifaceTypeDef = iface.Interface.ResolveTypeDef();
+                var ifaceTypeDef = ResolveOrBatchLookup(iface.Interface, context);
                 if (!IsInBatchAssembly(ifaceTypeDef, batchAsmNames)) continue;
                 if (history.TryGetValue((ifaceTypeDef!, oldMemberName, paramCount), out var ifaceName))
                     return ifaceName;
@@ -292,7 +311,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         foreach (var iface in declaringType.Interfaces)
         {
             if (typeByFullName.ContainsKey(iface.Interface.FullName)) continue;
-            var ifaceTypeDef = iface.Interface.ResolveTypeDef();
+            var ifaceTypeDef = ResolveOrBatchLookup(iface.Interface, context);
             if (!IsInBatchAssembly(ifaceTypeDef, batchAsmNames)) continue;
             history.TryAdd((ifaceTypeDef!, oldMemberName, paramCount), newName);
         }
@@ -300,11 +319,11 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         var baseRef = declaringType.BaseType;
         while (baseRef != null)
         {
-            var baseDef = baseRef.ResolveTypeDef();
+            var baseDef = ResolveOrBatchLookup(baseRef, context);
             if (baseDef == null) break;
             foreach (var iface in baseDef.Interfaces)
             {
-                var ifaceTypeDef = iface.Interface.ResolveTypeDef();
+                var ifaceTypeDef = ResolveOrBatchLookup(iface.Interface, context);
                 if (!IsInBatchAssembly(ifaceTypeDef, batchAsmNames)) continue;
                 history.TryAdd((ifaceTypeDef!, oldMemberName, paramCount), newName);
             }
@@ -437,7 +456,8 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
     private static bool ImplementsExternalInterface(
         List<MethodDef> group,
         Dictionary<string, TypeDef> typeByFullName,
-        HashSet<string> batchAsmNames)
+        HashSet<string> batchAsmNames,
+        ObfuscationContext context)
     {
         var methodName = group[0].Name.String;
         var methodSig = group[0].MethodSig;
@@ -453,7 +473,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                     if (declType == null) continue;
                     if (typeByFullName.ContainsKey(declType.FullName)) continue;
                     // バッチ内なら同名共有で扱うので「外部」とはみなさない
-                    var resolved = declType is TypeDef td ? td : declType.ResolveTypeDef();
+                    var resolved = declType is TypeDef td ? td : ResolveOrBatchLookup(declType, context);
                     if (IsInBatchAssembly(resolved, batchAsmNames)) continue;
                     return true;
                 }
@@ -463,11 +483,11 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             if (type == null) continue;
 
             // 外部インターフェイスに同名メソッドがあるかチェック（全インターフェイスを再帰的に）
-            if (HasMethodInExternalInterfaces(type, methodName, methodSig, typeByFullName, batchAsmNames))
+            if (HasMethodInExternalInterfaces(type, methodName, methodSig, typeByFullName, batchAsmNames, context))
                 return true;
 
             // 外部基底型チェーン全体を走査
-            if (HasMethodInExternalBaseChain(type, methodName, methodSig, typeByFullName, batchAsmNames))
+            if (HasMethodInExternalBaseChain(type, methodName, methodSig, typeByFullName, batchAsmNames, context))
                 return true;
         }
 
@@ -483,7 +503,8 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
     private static bool HasMethodInExternalInterfaces(
         TypeDef type, string methodName, MethodSig? methodSig,
         Dictionary<string, TypeDef> typeByFullName,
-        HashSet<string> batchAsmNames)
+        HashSet<string> batchAsmNames,
+        ObfuscationContext context)
     {
         foreach (var iface in type.Interfaces)
         {
@@ -494,13 +515,13 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 // モジュール内インターフェイスだが、そのインターフェイス自身が
                 // 外部インターフェイスを継承している場合を再帰チェック
                 var ifaceTypeDef = typeByFullName[ifaceFullName];
-                if (HasMethodInExternalInterfaces(ifaceTypeDef, methodName, methodSig, typeByFullName, batchAsmNames))
+                if (HasMethodInExternalInterfaces(ifaceTypeDef, methodName, methodSig, typeByFullName, batchAsmNames, context))
                     return true;
                 continue;
             }
 
-            // 外部インターフェイス
-            var resolved = iface.Interface.ResolveTypeDef();
+            // 外部インターフェイス — dnlib の Resolve が失敗してもバッチ内 fallback で救う
+            var resolved = ResolveOrBatchLookup(iface.Interface, context);
             if (resolved == null)
             {
                 // 解決不能 → CLR 標準メソッド名の場合のみスキップ
@@ -512,7 +533,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             // バッチ内 iface は同名共有するので「外部」扱いせず続行
             if (IsInBatchAssembly(resolved, batchAsmNames))
             {
-                if (HasMethodInExternalInterfaces(resolved, methodName, methodSig, typeByFullName, batchAsmNames))
+                if (HasMethodInExternalInterfaces(resolved, methodName, methodSig, typeByFullName, batchAsmNames, context))
                     return true;
                 continue;
             }
@@ -532,7 +553,8 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
     private static bool HasMethodInExternalBaseChain(
         TypeDef type, string methodName, MethodSig? methodSig,
         Dictionary<string, TypeDef> typeByFullName,
-        HashSet<string> batchAsmNames)
+        HashSet<string> batchAsmNames,
+        ObfuscationContext context)
     {
         var current = type.BaseType;
         while (current != null)
@@ -543,14 +565,14 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             {
                 // モジュール内基底型 → 飛ばしてさらに上をチェック
                 // ただしこの基底型のインターフェイスもチェック
-                if (HasMethodInExternalInterfaces(baseTypeDef, methodName, methodSig, typeByFullName, batchAsmNames))
+                if (HasMethodInExternalInterfaces(baseTypeDef, methodName, methodSig, typeByFullName, batchAsmNames, context))
                     return true;
                 current = baseTypeDef.BaseType;
                 continue;
             }
 
-            // 外部基底型
-            var resolved = current.ResolveTypeDef();
+            // 外部基底型 — dnlib の Resolve が失敗してもバッチ内 fallback で救う
+            var resolved = ResolveOrBatchLookup(current, context);
             if (resolved == null)
             {
                 if (IsWellKnownRuntimeMethodName(methodName))
@@ -561,7 +583,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             // バッチ内 base は外部扱いしない (同名共有で解決)
             if (IsInBatchAssembly(resolved, batchAsmNames))
             {
-                if (HasMethodInExternalInterfaces(resolved, methodName, methodSig, typeByFullName, batchAsmNames))
+                if (HasMethodInExternalInterfaces(resolved, methodName, methodSig, typeByFullName, batchAsmNames, context))
                     return true;
                 current = resolved.BaseType;
                 continue;
@@ -701,7 +723,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             if (!typeByFullName.ContainsKey(rootType.FullName)) continue;
 
             // 外部インターフェイス/基底型チェック
-            if (group.Any(g => HasExternalVirtualProperty(g.type, g.prop.Name, typeByFullName, context.BatchAssemblyNames)))
+            if (group.Any(g => HasExternalVirtualProperty(g.type, g.prop.Name, typeByFullName, context.BatchAssemblyNames, context)))
                 continue;
 
             // XAML バインディングで参照されるプロパティはスキップ
@@ -810,7 +832,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             var (rootType, _) = key;
             if (!typeByFullName.ContainsKey(rootType.FullName)) continue;
 
-            if (group.Any(g => HasExternalVirtualEvent(g.type, g.evt.Name, typeByFullName, context.BatchAssemblyNames)))
+            if (group.Any(g => HasExternalVirtualEvent(g.type, g.evt.Name, typeByFullName, context.BatchAssemblyNames, context)))
                 continue;
 
             // クロスアセンブリ iface 実装で別モジュールが既に新名を決定済みなら再利用
@@ -907,20 +929,22 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
     private static bool HasExternalVirtualProperty(
         TypeDef type, UTF8String propName,
         Dictionary<string, TypeDef> typeByFullName,
-        HashSet<string> batchAsmNames)
+        HashSet<string> batchAsmNames,
+        ObfuscationContext context)
     {
         foreach (var iface in type.Interfaces)
         {
             if (typeByFullName.ContainsKey(iface.Interface.FullName)) continue;
-            var ifaceTypeDef = iface.Interface.ResolveTypeDef();
-            if (ifaceTypeDef == null) return true; // 解決不能 → 安全のためスキップ
-            // バッチ内 iface は impl と iface で名前を揃えるため、ここでは「外部」扱いにしない
+            // dnlib.Resolve fallback batch lookup: probing path 不足で Resolve が
+            // 失敗しても、バッチ内なら元 FullName で確実に引ける。
+            var ifaceTypeDef = ResolveOrBatchLookup(iface.Interface, context);
+            if (ifaceTypeDef == null) return true; // 真に解決不能な外部 iface → 安全のためスキップ
             if (IsInBatchAssembly(ifaceTypeDef, batchAsmNames)) continue;
             if (ifaceTypeDef.Properties.Any(p => p.Name == propName)) return true;
         }
         if (type.BaseType != null && !typeByFullName.ContainsKey(type.BaseType.FullName))
         {
-            var baseTypeDef = type.BaseType.ResolveTypeDef();
+            var baseTypeDef = ResolveOrBatchLookup(type.BaseType, context);
             if (baseTypeDef?.Properties.Any(p => p.Name == propName) == true)
             {
                 if (!IsInBatchAssembly(baseTypeDef, batchAsmNames))
@@ -933,19 +957,20 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
     private static bool HasExternalVirtualEvent(
         TypeDef type, UTF8String evtName,
         Dictionary<string, TypeDef> typeByFullName,
-        HashSet<string> batchAsmNames)
+        HashSet<string> batchAsmNames,
+        ObfuscationContext context)
     {
         foreach (var iface in type.Interfaces)
         {
             if (typeByFullName.ContainsKey(iface.Interface.FullName)) continue;
-            var ifaceTypeDef = iface.Interface.ResolveTypeDef();
+            var ifaceTypeDef = ResolveOrBatchLookup(iface.Interface, context);
             if (ifaceTypeDef == null) return true;
             if (IsInBatchAssembly(ifaceTypeDef, batchAsmNames)) continue;
             if (ifaceTypeDef.Events.Any(e => e.Name == evtName)) return true;
         }
         if (type.BaseType != null && !typeByFullName.ContainsKey(type.BaseType.FullName))
         {
-            var baseTypeDef = type.BaseType.ResolveTypeDef();
+            var baseTypeDef = ResolveOrBatchLookup(type.BaseType, context);
             if (baseTypeDef?.Events.Any(e => e.Name == evtName) == true)
             {
                 if (!IsInBatchAssembly(baseTypeDef, batchAsmNames))
@@ -1130,7 +1155,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
 
                 // 外部インターフェースの暗黙的実装メソッドはスキップ
                 // (構造体や sealed クラスは IsVirtual=false だが、CLR が名前でマッチングするため)
-                if (IsImplicitExternalInterfaceMethod(type, method, context.BatchAssemblyNames))
+                if (IsImplicitExternalInterfaceMethod(type, method, context.BatchAssemblyNames, context))
                 {
                     context.Logger.Verbose($"外部インターフェース実装のためスキップ: {type.Name}.{oldName}");
                     continue;
@@ -1306,7 +1331,8 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
     /// CLR は名前+シグネチャで暗黙マッチングするため、リネームすると TypeLoadException になる。
     /// </summary>
     private static bool IsImplicitExternalInterfaceMethod(
-        TypeDef type, MethodDef method, HashSet<string> batchAsmNames)
+        TypeDef type, MethodDef method, HashSet<string> batchAsmNames,
+        ObfuscationContext context)
     {
         if (type.Interfaces.Count == 0) return false;
 
@@ -1314,7 +1340,7 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
 
         foreach (var iface in type.Interfaces)
         {
-            var resolved = iface.Interface.ResolveTypeDef();
+            var resolved = ResolveOrBatchLookup(iface.Interface, context);
             if (resolved == null)
             {
                 // 解決不能な外部インターフェイス → 既知のメソッド名ならスキップ
@@ -1339,12 +1365,12 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         var baseRef = type.BaseType;
         while (baseRef != null)
         {
-            var baseDef = baseRef.ResolveTypeDef();
+            var baseDef = ResolveOrBatchLookup(baseRef, context);
             if (baseDef == null) break;
 
             foreach (var iface in baseDef.Interfaces)
             {
-                var resolved = iface.Interface.ResolveTypeDef();
+                var resolved = ResolveOrBatchLookup(iface.Interface, context);
                 if (resolved == null)
                 {
                     if (IsWellKnownRuntimeMethodName(methodName))

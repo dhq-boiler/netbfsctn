@@ -58,6 +58,20 @@ public class ILObfuscationPipeline : IObfuscationPipeline
                     context.BatchAssemblyNames.Add(asmName);
             }
 
+            // バッチ全モジュールの型を、リネーム前の元 FullName で引ける辞書に登録。
+            // ProcessType が型名リネームを始めると FullName が変わってしまうため、
+            // 必ず Phase 2b の前に構築する。dnlib の TypeRef.Resolve() が失敗するケース
+            // (probing path 不足) の fallback として、クロスアセンブリ iface 検出等で参照する。
+            foreach (var module in modules)
+            {
+                foreach (var type in module.GetTypes())
+                {
+                    var fullName = type.FullName;
+                    if (!string.IsNullOrEmpty(fullName))
+                        context.BatchTypesByOriginalFullName.TryAdd(fullName, type);
+                }
+            }
+
             // WPF アセンブリ検出 (型リネーム自動スキップ用)
             foreach (var module in modules)
             {

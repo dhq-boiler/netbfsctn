@@ -47,4 +47,20 @@ public class ObfuscationContext
     /// 名前リネームをスキップせず、MemberRenameHistory を媒介に impl と同一の新名へ揃える。
     /// </summary>
     public HashSet<string> BatchAssemblyNames { get; } = new();
+
+    /// <summary>
+    /// バッチ内の全モジュールの型を、リネーム前の元 FullName → TypeDef オブジェクト参照 で引ける辞書。
+    /// リネーム開始前 (Phase 2a 完了時点) に構築されるため、キーは常に元の FullName。
+    /// 値は TypeDef オブジェクト参照で、リネーム後も同一オブジェクトなので追跡できる。
+    ///
+    /// 用途: クロスアセンブリの暗黙インターフェース実装検出で、impl 側から iface 側の
+    /// TypeDef を探す際、dnlib の Resolve() が (probing path の関係で) 失敗するケースに
+    /// 対する fallback として使用。例: MathIa.dll が PackageApi.IGeneratorPackage を実装
+    /// する場合、MathIa の隣に PackageApi.dll が置かれていないと Resolve は null を返すが、
+    /// この辞書ならバッチ内なので必ず引ける。
+    ///
+    /// 型は <c>object</c> にしておく (実体は <c>dnlib.DotNet.TypeDef</c> だが、Core が dnlib
+    /// に依存しないよう抽象化)。IL 側でキャストして使用する。
+    /// </summary>
+    public Dictionary<string, object> BatchTypesByOriginalFullName { get; } = new(StringComparer.Ordinal);
 }
