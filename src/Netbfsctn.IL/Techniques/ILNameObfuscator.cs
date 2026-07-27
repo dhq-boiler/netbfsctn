@@ -542,15 +542,21 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             var resolved = ResolveOrBatchLookup(iface.Interface, context);
             if (resolved == null)
             {
-                // 解決不能 → CLR 標準メソッド名の場合のみスキップ
-                if (IsWellKnownRuntimeMethodName(methodName))
+                // 解決不能 → CLR 標準メソッド名、または BCL インターフェイス実装ならスキップ。
+                // self-contained 発行物で System.IAsyncDisposable などが probing 不足で
+                // 解決できないケースを、名前空間で面を張って保護する。
+                if (IsWellKnownRuntimeMethodName(methodName) || IsFrameworkType(ifaceFullName))
                     return true;
                 continue; // それ以外はドメイン固有とみなして続行
             }
 
-            // バッチ内 iface は同名共有するので「外部」扱いせず続行
+            // バッチ内 iface は同名共有するので原則「外部」扱いしない。
+            // ただし rename 除外指定の iface は元名で固定され、同名共有が使えない。
+            // 実装側も元名で保持しないと interface dispatch が壊れる → 外部と同じくスキップ扱い。
             if (IsInBatchAssembly(resolved, batchAsmNames))
             {
+                if (IsRenameExcluded(resolved, context) && resolved.Methods.Any(m => m.Name == methodName))
+                    return true;
                 if (HasMethodInExternalInterfaces(resolved, methodName, methodSig, typeByFullName, batchAsmNames, context))
                     return true;
                 continue;
@@ -593,6 +599,10 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             var resolved = ResolveOrBatchLookup(current, context);
             if (resolved == null)
             {
+                // ここは基底「クラス」の走査。クラスは無数のメソッドを持つので、
+                // フレームワーク型だからと名前だけで面を張ると、無関係なメソッド
+                // (System.Object を基底に持つ型の GetName 等) まで巻き込む。
+                // BCL 由来の面張りは iface 経路 (HasMethodInExternalInterfaces) に限る。
                 if (IsWellKnownRuntimeMethodName(methodName))
                     return true;
                 break; // 解決不能だがドメイン固有メソッドなら続行
@@ -963,7 +973,13 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             // 失敗しても、バッチ内なら元 FullName で確実に引ける。
             var ifaceTypeDef = ResolveOrBatchLookup(iface.Interface, context);
             if (ifaceTypeDef == null) return true; // 真に解決不能な外部 iface → 安全のためスキップ
-            if (IsInBatchAssembly(ifaceTypeDef, batchAsmNames)) continue;
+            if (IsInBatchAssembly(ifaceTypeDef, batchAsmNames))
+            {
+                // rename 除外の iface プロパティは実装側も保持
+                if (IsRenameExcluded(ifaceTypeDef, context) && ifaceTypeDef.Properties.Any(p => p.Name == propName))
+                    return true;
+                continue;
+            }
             if (ifaceTypeDef.Properties.Any(p => p.Name == propName)) return true;
         }
         if (type.BaseType != null && !typeByFullName.ContainsKey(type.BaseType.FullName))
@@ -989,7 +1005,13 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             if (typeByFullName.ContainsKey(iface.Interface.FullName)) continue;
             var ifaceTypeDef = ResolveOrBatchLookup(iface.Interface, context);
             if (ifaceTypeDef == null) return true;
-            if (IsInBatchAssembly(ifaceTypeDef, batchAsmNames)) continue;
+            if (IsInBatchAssembly(ifaceTypeDef, batchAsmNames))
+            {
+                // rename 除外の iface イベントは実装側も保持
+                if (IsRenameExcluded(ifaceTypeDef, context) && ifaceTypeDef.Events.Any(e => e.Name == evtName))
+                    return true;
+                continue;
+            }
             if (ifaceTypeDef.Events.Any(e => e.Name == evtName)) return true;
         }
         if (type.BaseType != null && !typeByFullName.ContainsKey(type.BaseType.FullName))
@@ -1009,12 +1031,27 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
     /// </summary>
     private static bool IsWellKnownRuntimeMethodName(string name)
     {
-        return name is "Dispose" or "GetEnumerator" or "MoveNext" or "Reset" or "get_Current"
+        return name is "Dispose" or "DisposeAsync" or "GetEnumerator" or "GetAsyncEnumerator"
+            or "MoveNext" or "MoveNextAsync" or "Reset" or "get_Current"
             or "Equals" or "GetHashCode" or "ToString" or "CompareTo" or "Clone"
             or "GetObjectData" or "CopyTo" or "get_Count" or "get_Item" or "set_Item"
             or "Add" or "Remove" or "Contains" or "Clear" or "IndexOf" or "Insert"
             or "RemoveAt" or "GetType" or "Finalize";
     }
+
+    /// <summary>
+    /// BCL / フレームワーク由来の型か (<c>System.*</c> / <c>Microsoft.*</c>)。
+    ///
+    /// dnlib が Resolve に失敗しても、これらのインターフェイスを実装するメンバーは
+    /// CLR が名前で dispatch するためリネームしてはいけない。self-contained 発行物では
+    /// BCL アセンブリの probing に失敗しやすく、<see cref="IsWellKnownRuntimeMethodName"/>
+    /// の固定リストだけに頼ると <c>DisposeAsync</c> のような新しめの BCL メソッドを
+    /// 取りこぼして、TypeLoadException (実装が見つからない) を招く。名前空間で面を張る。
+    /// </summary>
+    private static bool IsFrameworkType(string fullName) =>
+        fullName.StartsWith("System.", StringComparison.Ordinal)
+        || fullName.StartsWith("Microsoft.", StringComparison.Ordinal)
+        || string.Equals(fullName, "System", StringComparison.Ordinal);
 
     private static void RenameParameters(ModuleDef module, ObfuscationContext context, ObfuscationResult result, bool renamePublic)
     {
@@ -1378,8 +1415,8 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             var resolved = ResolveOrBatchLookup(iface.Interface, context);
             if (resolved == null)
             {
-                // 解決不能な外部インターフェイス → 既知のメソッド名ならスキップ
-                if (IsWellKnownRuntimeMethodName(methodName))
+                // 解決不能な外部インターフェイス → 既知のメソッド名、または BCL 由来ならスキップ
+                if (IsWellKnownRuntimeMethodName(methodName) || IsFrameworkType(iface.Interface.FullName))
                     return true;
                 continue;
             }
@@ -1387,8 +1424,14 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             // モジュール内インターフェースはスキップ (virtual グループリネームで処理される)
             if (resolved.Module == type.Module) continue;
 
-            // バッチ内 iface は別パスで名前共有するので、ここでは「外部」扱いしない
-            if (IsInBatchAssembly(resolved, batchAsmNames)) continue;
+            // バッチ内 iface は別パスで名前共有するので原則「外部」扱いしない。
+            // ただし rename 除外の iface は共有できないため実装側も保持する。
+            if (IsInBatchAssembly(resolved, batchAsmNames))
+            {
+                if (IsRenameExcluded(resolved, context) && resolved.Methods.Any(m => m.Name == methodName))
+                    return true;
+                continue;
+            }
 
             // 外部インターフェースに同名メソッドがあればスキップ
             // (ジェネリック型パラメータのためシグネチャ比較ではなく名前で照合)
@@ -1408,12 +1451,17 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
                 var resolved = ResolveOrBatchLookup(iface.Interface, context);
                 if (resolved == null)
                 {
-                    if (IsWellKnownRuntimeMethodName(methodName))
+                    if (IsWellKnownRuntimeMethodName(methodName) || IsFrameworkType(iface.Interface.FullName))
                         return true;
                     continue;
                 }
                 if (resolved.Module == type.Module) continue;
-                if (IsInBatchAssembly(resolved, batchAsmNames)) continue;
+                if (IsInBatchAssembly(resolved, batchAsmNames))
+                {
+                    if (IsRenameExcluded(resolved, context) && resolved.Methods.Any(m => m.Name == methodName))
+                        return true;
+                    continue;
+                }
                 if (resolved.Methods.Any(m => m.Name == methodName))
                     return true;
             }

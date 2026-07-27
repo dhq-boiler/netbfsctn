@@ -288,7 +288,12 @@ public static partial class XamlBindingAnalyzer
             if (fullTypeName != null)
             {
                 result.ReferencedTypes.Add(fullTypeName);
+                // x:Static のメンバーは static プロパティ/フィールドにも enum 値にもなりうる。
+                // どちらか XAML だけでは判別できないので両方の保護集合へ入れる。enum の場合、
+                // BAML は値を文字列で焼き、起動時に Enum.Parse するため、フィールド名 (=値名) を
+                // リネームすると 'System' was not found のように XamlParseException で落ちる。
                 result.BoundPropertyNames.Add(memberName);
+                result.ReferencedEnumValues.Add(memberName);
                 logger.Verbose($"XAML x:Static: {fullTypeName}.{memberName}");
             }
         }

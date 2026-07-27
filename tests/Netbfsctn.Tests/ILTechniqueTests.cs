@@ -5,6 +5,16 @@ using Netbfsctn.IL.Techniques;
 
 namespace Netbfsctn.Tests;
 
+/// <summary>
+/// <see cref="System.IAsyncDisposable"/> を実装するサンプル。--rename-public 時に
+/// <c>DisposeAsync</c> がリネームされて実装がインターフェイスから外れないこと
+/// (self-contained 発行物で出た TypeLoadException の再発防止) を守るためだけに存在する。
+/// </summary>
+public class AsyncDisposableSample : IAsyncDisposable
+{
+    public virtual ValueTask DisposeAsync() => ValueTask.CompletedTask;
+}
+
 public class ILTechniqueTests : IDisposable
 {
     private readonly string _sampleDllPath;
@@ -752,6 +762,33 @@ public class ILTechniqueTests : IDisposable
 
         Assert.True(resWith.RenamedSymbols < resWithout.RenamedSymbols,
             $"除外指定でリネーム数が減っていない: with={resWith.RenamedSymbols}, without={resWithout.RenamedSymbols}");
+    }
+
+    [Fact]
+    public void NameObfuscator_PreservesIAsyncDisposableImplementation()
+    {
+        // IAsyncDisposable.DisposeAsync は CLR が名前で dispatch する。--rename-public で
+        // これを化けさせると、実装がインターフェイスから外れて TypeLoadException になる。
+        using var module = LoadSampleModule();
+        var options = new ObfuscationOptions
+        {
+            InputPath = "dummy.dll",
+            EnableRename = true,
+            EnableRenamePublic = true,
+            Verbose = true,
+        };
+        var context = new ObfuscationContext
+        {
+            Options = options, Logger = new ObfuscationLogger(verbose: false, quiet: true),
+        };
+        var result = new ObfuscationResult { Success = true };
+
+        var sample = module.GetTypes().Single(t => t.FullName == "Netbfsctn.Tests.AsyncDisposableSample");
+        var disposeAsync = sample.Methods.Single(m => m.Name == "DisposeAsync");
+
+        new ILNameObfuscator().Apply(module, context, result);
+
+        Assert.Equal("DisposeAsync", disposeAsync.Name.String);
     }
 
     /// <summary>ネスト型なら最外殻の型を返す (名前空間はそこにしか無い)。</summary>
