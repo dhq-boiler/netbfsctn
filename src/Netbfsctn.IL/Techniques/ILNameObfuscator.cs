@@ -136,6 +136,9 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         var renamedGroups = 0;
         foreach (var (key, group) in groups)
         {
+            // 除外指定の型に属するメンバーはグループごとスキップ
+            if (group.Any(m => IsRenameExcluded(m.DeclaringType, context))) continue;
+
             // SpecialName (get_/set_ 等) はスキップ
             if (group.Any(m => m.IsSpecialName)) continue;
 
@@ -209,6 +212,21 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
 
         if (renamedGroups > 0)
             context.Logger.Info($"virtual メソッドグループリネーム: {renamedGroups} グループ");
+    }
+
+    /// <summary>
+    /// 型 (ネスト型なら最外殻の名前空間で判定) が rename 除外対象かを返す。
+    /// 除外指定が無ければ即 false。型名・全メンバー名・パラメータ名の rename 経路すべてで
+    /// 同じ判定を通し、除外型は名前が一切変わらないことを保証する。
+    /// </summary>
+    private static bool IsRenameExcluded(TypeDef? type, ObfuscationContext context)
+    {
+        if (type == null) return false;
+        var outer = type;
+        while (outer.DeclaringType != null)
+            outer = outer.DeclaringType;
+        var ns = outer.Namespace?.String ?? "";
+        return context.IsRenameExcluded(ns, type.FullName);
     }
 
     /// <summary>
@@ -722,6 +740,9 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             // ルートがモジュール外ならスキップ
             if (!typeByFullName.ContainsKey(rootType.FullName)) continue;
 
+            // 除外指定の型に属するプロパティはグループごとスキップ
+            if (group.Any(g => IsRenameExcluded(g.type, context))) continue;
+
             // 外部インターフェイス/基底型チェック
             if (group.Any(g => HasExternalVirtualProperty(g.type, g.prop.Name, typeByFullName, context.BatchAssemblyNames, context)))
                 continue;
@@ -831,6 +852,9 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         {
             var (rootType, _) = key;
             if (!typeByFullName.ContainsKey(rootType.FullName)) continue;
+
+            // 除外指定の型に属するイベントはグループごとスキップ
+            if (group.Any(g => IsRenameExcluded(g.type, context))) continue;
 
             if (group.Any(g => HasExternalVirtualEvent(g.type, g.evt.Name, typeByFullName, context.BatchAssemblyNames, context)))
                 continue;
@@ -999,6 +1023,9 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
         {
             if (type.Name == "<Module>") continue;
 
+            // 除外指定の型はパラメータ名も保つ
+            if (IsRenameExcluded(type, context)) continue;
+
             foreach (var method in type.Methods)
             {
                 if (method.Parameters == null) continue;
@@ -1102,6 +1129,14 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
 
         foreach (var nested in type.NestedTypes)
             ProcessType(nested, context, result, renamePublic, sameModuleRenames, genericArgTypes);
+
+        // 除外指定 (名前空間 / 型 FullName) に当たる型は、型名もメンバー名も一切変えない。
+        // JSON シリアライズがメンバー名からキーを作る型を、--rename-public を効かせたまま守る。
+        if (IsRenameExcluded(type, context))
+        {
+            context.Logger.Verbose($"rename 除外指定のためスキップ: {type.FullName}");
+            return;
+        }
 
         if ((type.IsPublic || type.IsNestedPublic) && !renamePublic)
             return;

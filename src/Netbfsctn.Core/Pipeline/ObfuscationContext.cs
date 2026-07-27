@@ -28,6 +28,38 @@ public class ObfuscationContext
     public HashSet<string> ExcludeRenamePublicModules { get; } = new();
 
     /// <summary>
+    /// 与えられた型が rename 除外対象かを返す。
+    ///
+    /// 名前空間はプレフィックス一致 (<c>PaperPlane.Core.Models</c> 指定で、その名前空間と
+    /// 配下 (<c>...Models.Foo</c>) の型をすべて対象にする)。型 FullName は完全一致。
+    /// どちらの指定も無いときは常に false で、判定コストもかからない。
+    ///
+    /// ネスト型は呼び出し側で最外殻の名前空間を渡すこと (ネスト型自身の Namespace は空になる)。
+    /// </summary>
+    public bool IsRenameExcluded(string typeNamespace, string typeFullName)
+    {
+        if (Options.NoRenameTypes.Length == 0 && Options.NoRenameNamespaces.Length == 0)
+            return false;
+
+        foreach (var fqn in Options.NoRenameTypes)
+        {
+            if (string.Equals(typeFullName, fqn, StringComparison.Ordinal))
+                return true;
+        }
+
+        foreach (var ns in Options.NoRenameNamespaces)
+        {
+            if (string.IsNullOrEmpty(ns)) continue;
+            if (string.Equals(typeNamespace, ns, StringComparison.Ordinal))
+                return true;
+            if (typeNamespace.StartsWith(ns + ".", StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// XAML 解析結果。バインディングで参照されるプロパティ名・型名・イベントハンドラ名を保持する。
     /// null の場合、XAML 解析は無効 (--xaml-dir 未指定)。
     /// </summary>

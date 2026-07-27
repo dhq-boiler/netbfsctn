@@ -46,6 +46,14 @@ public class ObfuscationOptions
     // public リネーム除外アセンブリ名
     public string[] ExcludeRenamePublic { get; init; } = [];
 
+    // rename から丸ごと除外する名前空間 (プレフィックス一致。配下の型もすべて対象)。
+    // JSON シリアライズがメンバー名からキーを作る型や、XAML 以外の経路で名前に依存する
+    // 型を、--rename-public を効かせたまま名前だけ保つために使う。
+    public string[] NoRenameNamespaces { get; init; } = [];
+
+    // rename から丸ごと除外する型 (FullName 完全一致)。名前空間ぐるみでは広すぎるときの粒度。
+    public string[] NoRenameTypes { get; init; } = [];
+
     // XAML ソースディレクトリ (バインディング解析用)
     public string[] XamlDirectories { get; init; } = [];
 

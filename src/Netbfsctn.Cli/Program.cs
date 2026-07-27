@@ -134,6 +134,18 @@ var excludeRenamePublicOption = new Option<string[]>("--exclude-rename-public")
     AllowMultipleArgumentsPerToken = true
 };
 
+var noRenameNamespaceOption = new Option<string[]>("--no-rename-namespace")
+{
+    Description = "指定した名前空間 (配下含む) を rename から丸ごと除外 (複数指定可)。JSON シリアライズ等でメンバー名に依存する型を守る",
+    AllowMultipleArgumentsPerToken = true
+};
+
+var noRenameTypeOption = new Option<string[]>("--no-rename-type")
+{
+    Description = "指定した型 (FullName 完全一致) を rename から丸ごと除外 (複数指定可)",
+    AllowMultipleArgumentsPerToken = true
+};
+
 var additionalInputOption = new Option<string[]>("--additional-input")
 {
     Description = "追加の入力アセンブリパス (複数指定可)",
@@ -179,6 +191,8 @@ rootCommand.Options.Add(virtualizeOption);
 rootCommand.Options.Add(mbaOption);
 rootCommand.Options.Add(dynamicOpaqueOption);
 rootCommand.Options.Add(excludeRenamePublicOption);
+rootCommand.Options.Add(noRenameNamespaceOption);
+rootCommand.Options.Add(noRenameTypeOption);
 rootCommand.Options.Add(additionalInputOption);
 rootCommand.Options.Add(additionalOutputOption);
 rootCommand.Options.Add(xamlDirOption);
@@ -211,6 +225,8 @@ rootCommand.SetAction(parseResult =>
     var mba = parseResult.GetValue(mbaOption);
     var dynamicOpaque = parseResult.GetValue(dynamicOpaqueOption);
     var excludeRenamePublic = parseResult.GetValue(excludeRenamePublicOption) ?? [];
+    var noRenameNamespaces = parseResult.GetValue(noRenameNamespaceOption) ?? [];
+    var noRenameTypes = parseResult.GetValue(noRenameTypeOption) ?? [];
     var additionalInputs = parseResult.GetValue(additionalInputOption) ?? [];
     var additionalOutputs = parseResult.GetValue(additionalOutputOption) ?? [];
     var xamlDirs = parseResult.GetValue(xamlDirOption) ?? [];
@@ -232,6 +248,8 @@ rootCommand.SetAction(parseResult =>
         EnableRenameProperties = noRename ? renameProperties : true,
         EnableRenamePublic = renamePublic,
         ExcludeRenamePublic = excludeRenamePublic,
+        NoRenameNamespaces = noRenameNamespaces,
+        NoRenameTypes = noRenameTypes,
         EnableStringEncryption = !noStrings,
         EnableControlFlow = !noControlFlow,
         EnableDeadCode = !noDeadCode,

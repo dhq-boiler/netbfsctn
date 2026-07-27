@@ -651,6 +651,117 @@ public class ILTechniqueTests : IDisposable
             "ExcludeRenamePublicModules に登録済みなのに public 型がリネームされた");
     }
 
+    // === Name Obfuscator - rename 除外 (名前空間 / 型) ===
+
+    [Fact]
+    public void NameObfuscator_NoRenameNamespace_PreservesTypesAndMembers()
+    {
+        // 除外指定の名前空間は、--rename-public を効かせても型名もメンバー名も一切変わらない。
+        // JSON シリアライズがメンバー名からキーを作る型を守るための中心的な保証。
+        using var module = LoadSampleModule();
+        var options = new ObfuscationOptions
+        {
+            InputPath = "dummy.dll",
+            EnableRename = true,
+            EnableRenamePublic = true,
+            NoRenameNamespaces = ["Netbfsctn.Tests"],
+            Verbose = true,
+        };
+        var logger = new ObfuscationLogger(verbose: true, quiet: false);
+        var context = new ObfuscationContext { Options = options, Logger = logger };
+        var result = new ObfuscationResult { Success = true };
+
+        var excludedTypes = module.GetTypes()
+            .Where(t => Outermost(t).Namespace == "Netbfsctn.Tests")
+            .ToList();
+        Assert.NotEmpty(excludedTypes);
+
+        new ILNameObfuscator().Apply(module, context, result);
+
+        // 型名: NameMap (型リネームの記録先) に除外型の FullName が現れない
+        foreach (var t in excludedTypes)
+            Assert.False(context.NameMap.ContainsKey(t.FullName),
+                $"除外名前空間の型がリネームされた: {t.FullName}");
+
+        // メンバー名: MemberRenameHistory に除外型 (TypeDef 参照) が現れない
+        var excludedSet = excludedTypes.Cast<object>().ToHashSet();
+        Assert.DoesNotContain(context.MemberRenameHistory.Keys,
+            k => excludedSet.Contains(k.Item1));
+    }
+
+    [Fact]
+    public void NameObfuscator_NoRenameType_PreservesOnlyThatType()
+    {
+        // 型 FullName 完全一致の除外。指定した 1 型だけ保たれ、他は通常どおりリネームされる。
+        using var module = LoadSampleModule();
+        const string keep = "Netbfsctn.Tests.ILTechniqueTests";
+        var options = new ObfuscationOptions
+        {
+            InputPath = "dummy.dll",
+            EnableRename = true,
+            EnableRenamePublic = true,
+            NoRenameTypes = [keep],
+            Verbose = true,
+        };
+        var logger = new ObfuscationLogger(verbose: true, quiet: false);
+        var context = new ObfuscationContext { Options = options, Logger = logger };
+        var result = new ObfuscationResult { Success = true };
+
+        var keptType = module.GetTypes().Single(t => t.FullName == keep);
+
+        new ILNameObfuscator().Apply(module, context, result);
+
+        // 除外した型は型名もメンバーも保たれる
+        Assert.False(context.NameMap.ContainsKey(keep),
+            "除外指定の型がリネームされた");
+        Assert.DoesNotContain(context.MemberRenameHistory.Keys,
+            k => ReferenceEquals(k.Item1, keptType));
+
+        // 他の型はリネームされている (除外が全体を止めていないことの確認)
+        Assert.True(result.RenamedSymbols > 0);
+    }
+
+    [Fact]
+    public void NameObfuscator_NoRenameNamespace_RenamesFewerThanWithout()
+    {
+        // 除外ありは除外なしよりリネーム数が少ない。
+        using var moduleWithout = LoadSampleModule();
+        var optWithout = new ObfuscationOptions
+        {
+            InputPath = "dummy.dll", EnableRename = true, EnableRenamePublic = true, Verbose = true,
+        };
+        var ctxWithout = new ObfuscationContext
+        {
+            Options = optWithout, Logger = new ObfuscationLogger(verbose: false, quiet: true),
+        };
+        var resWithout = new ObfuscationResult { Success = true };
+        new ILNameObfuscator().Apply(moduleWithout, ctxWithout, resWithout);
+
+        using var moduleWith = LoadSampleModule();
+        var optWith = new ObfuscationOptions
+        {
+            InputPath = "dummy.dll", EnableRename = true, EnableRenamePublic = true,
+            NoRenameNamespaces = ["Netbfsctn.Tests"], Verbose = true,
+        };
+        var ctxWith = new ObfuscationContext
+        {
+            Options = optWith, Logger = new ObfuscationLogger(verbose: false, quiet: true),
+        };
+        var resWith = new ObfuscationResult { Success = true };
+        new ILNameObfuscator().Apply(moduleWith, ctxWith, resWith);
+
+        Assert.True(resWith.RenamedSymbols < resWithout.RenamedSymbols,
+            $"除外指定でリネーム数が減っていない: with={resWith.RenamedSymbols}, without={resWithout.RenamedSymbols}");
+    }
+
+    /// <summary>ネスト型なら最外殻の型を返す (名前空間はそこにしか無い)。</summary>
+    private static TypeDef Outermost(TypeDef type)
+    {
+        var t = type;
+        while (t.DeclaringType != null) t = t.DeclaringType;
+        return t;
+    }
+
     // === 混合モード検出テスト ===
 
     [Fact]

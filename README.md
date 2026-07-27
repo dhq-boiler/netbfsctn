@@ -129,6 +129,30 @@ netbfsctn MyApp.dll --no-rename --rename-types --rename-methods
 | `--rename-properties` | Rename properties only |
 | `--rename-public` | Rename public members (with cross-assembly reference fixing) |
 | `--exclude-rename-public` | Exclude specific assemblies from public renaming (multiple allowed) |
+| `--no-rename-namespace` | Exclude a namespace (and everything under it) from renaming entirely (multiple allowed) |
+| `--no-rename-type` | Exclude a type by FullName from renaming entirely (multiple allowed) |
+
+### Excluding types from renaming
+
+`--rename-public` renames public types and members too, which breaks anything that
+resolves members **by name** at runtime — most commonly `System.Text.Json` /
+Newtonsoft models whose JSON keys are derived from property names. When the property
+is renamed, previously-written config files no longer round-trip.
+
+Keep those types intact while still renaming everything else:
+
+```bash
+# Protect a whole namespace of persistence models
+netbfsctn App.dll --rename-public --no-rename-namespace MyApp.Core.Models
+
+# Or a single type by FullName
+netbfsctn App.dll --rename-public --no-rename-type MyApp.Core.Models.Account
+```
+
+Excluded types keep their type name, every member name (fields, methods, properties,
+events), and parameter names. Namespaces match by prefix, so `MyApp.Core.Models` also
+covers `MyApp.Core.Models.Sub`. Other obfuscation passes (string encryption, control
+flow) still apply — only renaming is skipped, and only for the listed types.
 
 ## Benchmarks
 
@@ -194,6 +218,8 @@ Basic techniques (enabled by default):
   --rename-properties       Rename properties only
   --rename-public           Rename public members (cross-assembly safe)
   --exclude-rename-public   Exclude assemblies from public renaming
+  --no-rename-namespace     Exclude a namespace (and everything under it) from renaming
+  --no-rename-type          Exclude a type (by FullName) from renaming
   --no-strings              Disable string encryption
   --no-control-flow         Disable control flow obfuscation
   --no-dead-code            Disable dead code insertion
