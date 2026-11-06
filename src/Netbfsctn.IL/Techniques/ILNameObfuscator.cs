@@ -31,16 +31,16 @@ public class ILNameObfuscator : IObfuscationTechnique<ModuleDef>
             ProcessType(type, context, result, renamePublic, sameModuleRenames, genericArgTypes);
         }
 
-        // 同一モジュール内 MemberRef の修正
-        if (sameModuleRenames.Count > 0)
-            FixSameModuleMemberRefs(module, sameModuleRenames, context);
-
         if (renamePublic)
         {
             RenameVirtualMethodGroups(module, context, result, sameModuleRenames);
             RenameVirtualPropertyGroups(module, context, result, sameModuleRenames);
             RenameVirtualEventGroups(module, context, result, sameModuleRenames);
         }
+
+        // Virtual members are renamed after ordinary members; fixing references earlier leaves stale generic calls.
+        if (sameModuleRenames.Count > 0)
+            FixSameModuleMemberRefs(module, sameModuleRenames, context);
 
         // パラメーター名の難読化。 public メソッドの引数名は renamePublic が立っているときだけ
         // リネームする (メンバー名 rename と対称)。 理由: リフレクションでメソッド引数名を読む
